@@ -39,9 +39,13 @@ npm run dev
 
 ## Windows EXE 打包
 
+可直接双击 `QIHUOBAT\打包客户版EXE.bat`，完成后会自动打开 `release` 目录。
+也可以在 PowerShell 中运行：
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build_windows.ps1
 ```
 
-产物位于 `release\智能期货.exe`。双击后显示实时日志窗口，并自动打开浏览器；
+产物为 `release\智能期货.exe` 和可直接交付的 `release\PXYFUTURES-client.zip`。
+双击 EXE 后显示实时日志窗口，并自动打开浏览器；
 运行数据保存在 EXE 同目录的 `data` 文件夹。

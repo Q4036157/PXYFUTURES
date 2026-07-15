@@ -5,6 +5,8 @@ $Python = Join-Path $Root "backend\.venv\Scripts\python.exe"
 $Release = Join-Path $Root "release"
 $Build = Join-Path $Root "packaging\build"
 $Spec = Join-Path $Root "packaging\pxyfutures.spec"
+$Readme = Join-Path $Release "README.txt"
+$Zip = Join-Path $Release "PXYFUTURES-client.zip"
 
 if (-not (Test-Path $Python)) {
     throw "Backend virtual environment not found: $Python"
@@ -32,7 +34,10 @@ Write-Host "[3/4] Packaging single-file EXE..."
 & $Python -m PyInstaller --noconfirm --clean --distpath $Release --workpath $Build $Spec
 if ($LASTEXITCODE -ne 0) { throw "EXE packaging failed" }
 
-Copy-Item (Join-Path $Root "packaging\client_readme.txt") (Join-Path $Release "README.txt") -Force
+Copy-Item (Join-Path $Root "packaging\client_readme.txt") $Readme -Force
+$Exe = Get-ChildItem $Release -Filter "*.exe" | Select-Object -First 1
+if (-not $Exe) { throw "Packaged EXE was not found in: $Release" }
+Compress-Archive -LiteralPath @($Exe.FullName, $Readme) -DestinationPath $Zip -CompressionLevel Optimal -Force
 
 Write-Host "[4/4] Done"
-Get-ChildItem $Release -Filter "*.exe" | Select-Object FullName, Length
+$Exe, (Get-Item $Zip) | Select-Object FullName, Length

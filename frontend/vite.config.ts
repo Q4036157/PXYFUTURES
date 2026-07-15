@@ -10,6 +10,10 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },
+    build: {
+      // 搜狗高速模式可能使用较旧的 Chromium 内核，避免输出过新的 JS 语法。
+      target: 'chrome64',
+    },
     server: {
       port: Number(env.VITE_DEV_PORT) || 3021,
       proxy: {

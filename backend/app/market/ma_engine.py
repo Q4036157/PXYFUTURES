@@ -92,11 +92,12 @@ def _short_series(closes: Sequence[float], period: int) -> list[float | None]:
     ]
 
 
-def _classify(cross_type: CrossType, cross_value: float, m3: float, m4: float) -> str:
+def _classify(cross_type: CrossType, m2: float, m3: float, m4: float) -> str:
+    """根据最近交叉方向和当前 M2 相对长均线的位置判断阶段。"""
     lower, upper = sorted((m3, m4))
-    if cross_value < lower:
+    if m2 < lower:
         return "反弹" if cross_type == CrossType.GOLDEN else "下跌"
-    if cross_value > upper:
+    if m2 > upper:
         return "上涨" if cross_type == CrossType.GOLDEN else "回调"
     if m3 > m4:
         return "多震荡"
@@ -105,34 +106,17 @@ def _classify(cross_type: CrossType, cross_value: float, m3: float, m4: float) -
     return "震荡"
 
 
-def _interpolate_cross(
-    m1_prev: float,
-    m2_prev: float,
-    m1_now: float,
-    m2_now: float,
-    m3_prev: float,
-    m3_now: float,
-    m4_prev: float,
-    m4_now: float,
-) -> tuple[float, float, float]:
-    """按图表相邻两点的线段，计算 M1/M2 交点及交点处的 M3/M4。"""
-    difference_prev = m1_prev - m2_prev
-    difference_now = m1_now - m2_now
-    denominator = difference_now - difference_prev
-    fraction = 1.0 if denominator == 0 else -difference_prev / denominator
-    fraction = min(1.0, max(0.0, fraction))
-
-    cross_value = m1_prev + fraction * (m1_now - m1_prev)
-    m3_at_cross = m3_prev + fraction * (m3_now - m3_prev)
-    m4_at_cross = m4_prev + fraction * (m4_now - m4_prev)
-    return cross_value, m3_at_cross, m4_at_cross
-
-
-def calculate_signal(bars: Sequence[Bar], config: MovingAverageConfig) -> SignalState:
+def calculate_signal(
+    bars: Sequence[Bar],
+    config: MovingAverageConfig,
+    *,
+    confirmed_bar_count: int | None = None,
+) -> SignalState:
     """从 K 线历史恢复当前状态。
 
-    交叉发生时根据 M1/M2 实际交点相对 M3/M4 的位置确定分类，随后保持，
-    直到反向交叉。因此无需把状态作为唯一事实持久化。
+    M1/M2 最近一次交叉确定金叉或死叉阶段；之后每根已收盘 K 线根据
+    M2 相对 M3/M4 的位置动态更新反弹、震荡、上涨、回调或下跌。
+    最新进行中 K 线仍参与实时均线值和方向计算，但不提前改变状态。
     """
     if len(bars) < config.required_bars:
         raise ValueError(f"K 线数量不足，至少需要 {config.required_bars} 根有效 K 线")
@@ -156,31 +140,29 @@ def calculate_signal(bars: Sequence[Bar], config: MovingAverageConfig) -> Signal
     latest_cross: CrossType | None = None
     latest_label = "等待交叉"
     state_since_ns: int | None = None
-    for index in range(1, len(bars)):
+    state_bar_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
+    state_bar_count = min(len(bars), max(0, state_bar_count))
+    for index in range(1, state_bar_count):
         m1_prev, m2_prev = series["M1"][index - 1], series["M2"][index - 1]
         m1_now, m2_now = series["M1"][index], series["M2"][index]
-        m3_prev, m4_prev = series["M3"][index - 1], series["M4"][index - 1]
         m3_now, m4_now = series["M3"][index], series["M4"][index]
-        if None in (m1_prev, m2_prev, m1_now, m2_now, m3_prev, m4_prev, m3_now, m4_now):
+        if None in (m1_prev, m2_prev, m1_now, m2_now, m3_now, m4_now):
             continue
-        cross_type: CrossType | None = None
         if m1_prev <= m2_prev and m1_now > m2_now:
-            cross_type = CrossType.GOLDEN
+            latest_cross = CrossType.GOLDEN
         elif m1_prev >= m2_prev and m1_now < m2_now:
-            cross_type = CrossType.DEATH
-        if cross_type is not None:
-            cross_value, m3_at_cross, m4_at_cross = _interpolate_cross(
-                float(m1_prev),
-                float(m2_prev),
-                float(m1_now),
-                float(m2_now),
-                float(m3_prev),
-                float(m3_now),
-                float(m4_prev),
-                float(m4_now),
-            )
-            latest_cross = cross_type
-            latest_label = _classify(cross_type, cross_value, m3_at_cross, m4_at_cross)
+            latest_cross = CrossType.DEATH
+        if latest_cross is None:
+            continue
+
+        current_label = _classify(
+            latest_cross,
+            float(m2_now),
+            float(m3_now),
+            float(m4_now),
+        )
+        if current_label != latest_label:
+            latest_label = current_label
             state_since_ns = bars[index].timestamp_ns
 
     return SignalState(

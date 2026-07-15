@@ -54,6 +54,17 @@ class FakeSymbolApi:
         return ["DCE.v2609", "DCE.v2610", "SHFE.au2609"]
 
 
+class FakeCzceSymbolApi:
+    def query_quotes(self, **kwargs: object) -> list[str]:
+        assert kwargs == {
+            "ins_class": "FUTURE",
+            "exchange_id": "CZCE",
+            "product_id": "OI",
+            "expired": False,
+        }
+        return ["CZCE.OI609", "CZCE.OI611", "DCE.v2609"]
+
+
 class FakeKlineCache:
     def __init__(self) -> None:
         self.rows: list[tuple[int, float]] = []
@@ -124,6 +135,15 @@ def test_active_future_validation_accepts_current_future() -> None:
     assert api.symbol == "DCE.v2609"
 
 
+def test_active_future_validation_preserves_czce_product_case() -> None:
+    api = FakeQuoteApi()
+    client = TqClient()
+    client._api = api
+
+    assert client.require_active_future("CZCE.OI609") == "CZCE.OI609"
+    assert api.symbol == "CZCE.OI609"
+
+
 @pytest.mark.parametrize("ins_class,expired", [("", False), ("FUTURE", True), ("OPTION", False)])
 def test_active_future_validation_rejects_unavailable_contract(ins_class: str, expired: bool) -> None:
     client = TqClient()
@@ -141,3 +161,10 @@ def test_active_future_suggestions_are_cached_and_limited_to_the_exchange() -> N
     assert client.list_active_futures("dce", "v") == ["DCE.v2609", "DCE.v2610"]
     assert client.list_active_futures("DCE", "V") == ["DCE.v2609", "DCE.v2610"]
     assert api.calls == 1
+
+
+def test_active_future_suggestions_use_czce_product_case() -> None:
+    client = TqClient()
+    client._api = FakeCzceSymbolApi()
+
+    assert client.list_active_futures("czce", "oi") == ["CZCE.OI609", "CZCE.OI611"]

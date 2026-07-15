@@ -27,7 +27,13 @@ const contractEditForm = ref({ exchange: '', code: '', name: '' })
 const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 })
 const credentials = ref({ username: '', password: '' })
 let timer: number | undefined
-let signalAbortController: AbortController | null = null
+interface RequestController {
+  readonly aborted: boolean
+  signal?: AbortSignal
+  abort: () => void
+}
+
+let signalAbortController: RequestController | null = null
 let refreshingContractId: number | null = null
 const dirtyNoteDurations = new Set<number>()
 const savingNoteKeys = new Set<string>()
@@ -54,6 +60,23 @@ const selectedSignal = computed(() => (
 ))
 const recognition = computed(() => recognizeContract(form.value.code))
 const contractEditRecognition = computed(() => recognizeContract(contractEditForm.value.code))
+
+function createRequestController(): RequestController {
+  if (typeof AbortController !== 'undefined') {
+    const controller = new AbortController()
+    return {
+      get aborted() { return controller.signal.aborted },
+      signal: controller.signal,
+      abort: () => controller.abort(),
+    }
+  }
+
+  let aborted = false
+  return {
+    get aborted() { return aborted },
+    abort: () => { aborted = true },
+  }
+}
 
 interface ContractSuggestion {
   value: string
@@ -222,7 +245,7 @@ async function refreshSignals(): Promise<void> {
   if (!contractId || (refreshing.value && refreshingContractId === contractId)) return
 
   signalAbortController?.abort()
-  const controller = new AbortController()
+  const controller = createRequestController()
   signalAbortController = controller
   refreshingContractId = contractId
   refreshing.value = true
@@ -238,7 +261,7 @@ async function refreshSignals(): Promise<void> {
       selectedDuration.value = data.signals[0]?.period.duration_seconds || null
     }
   } catch (error: any) {
-    if (controller.signal.aborted) return
+    if (controller.aborted) return
     errorText.value = error.response?.data?.detail || '读取均线数据失败'
   } finally {
     if (signalAbortController === controller) {
@@ -404,10 +427,9 @@ onBeforeUnmount(() => {
         <div v-if="errorText" class="data-error">{{ errorText }}</div>
         <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td class="signal-state-cell"><div class="state signal-state-layout" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''"><span>{{ signal.label }}</span><span class="cross-type">{{ signal.cross_type || '' }}</span></div></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
         <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
+        <footer v-if="selectedContract" class="ma-footer"><span>均线数值 · {{ displayContractCode(selectedContract.code) }} · {{ selectedSignal?.period.label || '--' }}：</span><strong>M4：{{ maText('M4') }}{{ longTrendText('m4') }}</strong><strong>M3：{{ maText('M3') }}{{ longTrendText('m3') }}</strong><strong>M2：{{ maText('M2') }}</strong><strong>M1：{{ maText('M1') }}</strong><small v-if="selectedSignal">{{ selectedSignal.period.label }} · {{ selectedSignal.bar_time.replace('T', ' ').slice(0, 19) }} · {{ dataStatusText(selectedSignal) }}</small><small v-else>等待可用的实时 K 线数据</small></footer>
       </div>
     </section>
-
-    <footer v-if="selectedContract" class="ma-footer"><span>均线数值 · {{ displayContractCode(selectedContract.code) }} · {{ selectedSignal?.period.label || '--' }}：</span><strong>M4：{{ maText('M4') }}{{ longTrendText('m4') }}</strong><strong>M3：{{ maText('M3') }}{{ longTrendText('m3') }}</strong><strong>M2：{{ maText('M2') }}</strong><strong>M1：{{ maText('M1') }}</strong><small v-if="selectedSignal">{{ selectedSignal.period.label }} · {{ selectedSignal.bar_time.replace('T', ' ').slice(0, 19) }} · {{ dataStatusText(selectedSignal) }}</small><small v-else>等待可用的实时 K 线数据</small></footer>
 
     <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close>
       <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item></el-form>

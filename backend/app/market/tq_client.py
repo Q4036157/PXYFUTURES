@@ -15,7 +15,7 @@ from app.market.boyi_kline import (
     rebuild_boyi_bars,
     should_rebuild_for_boyi,
 )
-from app.market.contract_catalog import to_tq_symbol
+from app.market.contract_catalog import to_tq_product, to_tq_symbol
 from app.market.ma_engine import Bar
 from app.services.repository import ConfigRepository, KlineSyncState
 from app.services.secrets_store import get_tq_credentials
@@ -262,7 +262,7 @@ class TqClient:
                 symbols = api.query_quotes(
                     ins_class="FUTURE",
                     exchange_id=normalized_exchange,
-                    product_id=normalized_product.lower(),
+                    product_id=to_tq_product(normalized_exchange, normalized_product),
                     expired=False,
                 )
             except Exception as exc:  # noqa: BLE001

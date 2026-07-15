@@ -7,27 +7,29 @@ from dataclasses import dataclass
 # 以常用品种为主。按最长前缀匹配，避免例如 A 与 AO、P 与 PP/PX 混淆。
 PRODUCT_EXCHANGES: dict[str, str] = {
     # 郑商所
-    "AP": "CZCE", "CF": "CZCE", "CJ": "CZCE", "FG": "CZCE", "MA": "CZCE",
-    "OI": "CZCE", "PF": "CZCE", "PK": "CZCE", "PM": "CZCE", "PR": "CZCE",
+    "AP": "CZCE", "CF": "CZCE", "CJ": "CZCE", "CY": "CZCE", "FG": "CZCE",
+    "JR": "CZCE", "MA": "CZCE", "OI": "CZCE", "PF": "CZCE", "PK": "CZCE",
+    "PL": "CZCE", "PM": "CZCE", "PR": "CZCE",
     "PX": "CZCE", "RI": "CZCE", "RM": "CZCE", "RS": "CZCE", "SA": "CZCE",
     "SF": "CZCE", "SH": "CZCE", "SM": "CZCE", "SR": "CZCE", "TA": "CZCE",
     "UR": "CZCE", "WH": "CZCE", "ZC": "CZCE", "LR": "CZCE",
     # 大商所
-    "A": "DCE", "B": "DCE", "BB": "DCE", "C": "DCE", "CS": "DCE", "EB": "DCE",
-    "EG": "DCE", "FB": "DCE", "I": "DCE", "J": "DCE", "JD": "DCE", "JM": "DCE",
-    "L": "DCE", "LH": "DCE", "M": "DCE", "P": "DCE", "PG": "DCE", "PP": "DCE",
+    "A": "DCE", "B": "DCE", "BB": "DCE", "BZ": "DCE", "C": "DCE", "CS": "DCE",
+    "EB": "DCE", "EG": "DCE", "FB": "DCE", "I": "DCE", "J": "DCE", "JD": "DCE",
+    "JM": "DCE", "L": "DCE", "LG": "DCE", "LH": "DCE", "M": "DCE", "P": "DCE",
+    "PG": "DCE", "PP": "DCE",
     "RR": "DCE", "V": "DCE", "Y": "DCE",
     # 上期所
-    "AG": "SHFE", "AL": "SHFE", "AO": "SHFE", "AU": "SHFE", "BR": "SHFE", "BU": "SHFE",
-    "CU": "SHFE", "HC": "SHFE", "NI": "SHFE", "PB": "SHFE", "RB": "SHFE", "RU": "SHFE",
-    "SN": "SHFE", "SP": "SHFE", "SS": "SHFE", "WR": "SHFE", "ZN": "SHFE",
+    "AD": "SHFE", "AG": "SHFE", "AL": "SHFE", "AO": "SHFE", "AU": "SHFE", "BR": "SHFE", "BU": "SHFE",
+    "CU": "SHFE", "FU": "SHFE", "HC": "SHFE", "NI": "SHFE", "PB": "SHFE", "RB": "SHFE", "RU": "SHFE",
+    "OP": "SHFE", "SN": "SHFE", "SP": "SHFE", "SS": "SHFE", "WR": "SHFE", "ZN": "SHFE",
     # 上海国际能源交易中心
     "BC": "INE", "EC": "INE", "LU": "INE", "NR": "INE", "SC": "INE",
     # 中金所
     "IC": "CFFEX", "IF": "CFFEX", "IH": "CFFEX", "IM": "CFFEX", "T": "CFFEX",
     "TF": "CFFEX", "TL": "CFFEX", "TS": "CFFEX",
     # 广期所
-    "LC": "GFEX", "PS": "GFEX", "PT": "GFEX", "SI": "GFEX",
+    "LC": "GFEX", "PD": "GFEX", "PS": "GFEX", "PT": "GFEX", "SI": "GFEX",
 }
 
 # 常见中文品种简称。数据源仍使用右侧的标准品种代码。
@@ -37,6 +39,7 @@ PRODUCT_ALIASES: dict[str, str] = {
 }
 
 _FULL_CONTRACT = re.compile(r"^([A-Z]+)(\d{3,4})$")
+_TQ_UPPERCASE_PRODUCT_EXCHANGES = frozenset({"CZCE", "CFFEX"})
 
 
 @dataclass(frozen=True)
@@ -47,12 +50,21 @@ class ContractCode:
     complete: bool
 
 
+def to_tq_product(exchange: str, product: str) -> str:
+    """按天勤规则转换品种代码大小写。"""
+    normalized_exchange = exchange.upper()
+    if normalized_exchange in _TQ_UPPERCASE_PRODUCT_EXCHANGES:
+        return product.upper()
+    return product.lower()
+
+
 def to_tq_symbol(symbol: str) -> str:
-    """转换为天勤使用的合约格式：交易所大写，品种代码小写。"""
+    """转换为天勤使用的交易所和合约代码格式。"""
     exchange, separator, code = symbol.partition(".")
     if not separator or not exchange or not code:
         return symbol
-    return f"{exchange.upper()}.{code.lower()}"
+    normalized_exchange = exchange.upper()
+    return f"{normalized_exchange}.{to_tq_product(normalized_exchange, code)}"
 
 
 def normalize_contract_code(value: str) -> ContractCode:

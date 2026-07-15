@@ -32,7 +32,8 @@ def _snapshot(
             f"当前均线最大周期为 {max(period.m1 * 4, period.m2, period.m3, period.m4)}，"
             f"至少需要 {config.required_bars} 根；请降低均线周期或更换历史更长的合约"
         )
-    signal = calculate_signal(bars, config)
+    # 天勤序列最后一根可能仍在形成；状态只用此前已确认收盘的 K 线。
+    signal = calculate_signal(bars, config, confirmed_bar_count=len(bars) - 1)
     logger.debug(
         "均线计算成功: symbol=%s period=%s bars=%d ma=%s cross=%s label=%s",
         symbol,
