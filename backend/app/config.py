@@ -1,6 +1,7 @@
 """智能期货运行配置。"""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,7 +30,12 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: object) -> None:
         if not self.data_dir.is_absolute():
-            self.data_dir = (Path(__file__).resolve().parents[2] / self.data_dir).resolve()
+            base_dir = (
+                Path(sys.executable).resolve().parent
+                if getattr(sys, "frozen", False)
+                else Path(__file__).resolve().parents[2]
+            )
+            self.data_dir = (base_dir / self.data_dir).resolve()
 
 
 settings = Settings()

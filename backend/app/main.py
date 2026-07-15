@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,7 +24,11 @@ _file_handler = logging.FileHandler(settings.log_file, encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter(_log_format))
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(logging.Formatter(_log_format))
-logging.basicConfig(level=settings.log_level, handlers=[_file_handler, _stream_handler])
+logging.basicConfig(
+    level=settings.log_level,
+    handlers=[_file_handler, _stream_handler],
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -65,11 +70,16 @@ app.include_router(settings_api.router)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "service": "pxyfutures"}
 
 
-# 独立交付时由后端直接托管前端构建产物；开发环境仍可使用 Vite 服务。
-_static_dir = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+# 冻结版从 PyInstaller 解压目录读取资源；开发版仍读取项目中的构建产物。
+_bundle_root = getattr(sys, "_MEIPASS", None)
+_static_dir = (
+    Path(_bundle_root) / "frontend" / "dist"
+    if _bundle_root
+    else Path(__file__).resolve().parents[2] / "frontend" / "dist"
+)
 if _static_dir.exists():
     if (_static_dir / "assets").exists():
         app.mount("/assets", StaticFiles(directory=_static_dir / "assets"), name="assets")

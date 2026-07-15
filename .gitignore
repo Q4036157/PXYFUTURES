@@ -14,3 +14,5 @@ frontend/dist/
 frontend/*.tsbuildinfo
 /data/
 *.db
+/packaging/build/
+/release/
