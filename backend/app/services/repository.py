@@ -21,6 +21,17 @@ class PeriodConfig:
     note: str = ""
 
 
+DEFAULT_PERIOD_CONFIGS: tuple[PeriodConfig, ...] = (
+    PeriodConfig(id=None, label="日线", duration_seconds=86_400, m4=120, m3=60, m2=21, m1=4),
+    PeriodConfig(id=None, label="2小时", duration_seconds=7_200, m4=180, m3=60, m2=21, m1=4),
+    PeriodConfig(id=None, label="1小时", duration_seconds=3_600, m4=240, m3=80, m2=21, m1=4),
+    PeriodConfig(id=None, label="30分钟", duration_seconds=1_800, m4=240, m3=80, m2=21, m1=4),
+    PeriodConfig(id=None, label="10分钟", duration_seconds=600, m4=240, m3=60, m2=21, m1=4),
+    PeriodConfig(id=None, label="5分钟", duration_seconds=300, m4=240, m3=60, m2=21, m1=4),
+    PeriodConfig(id=None, label="3分钟", duration_seconds=180, m4=200, m3=100, m2=21, m1=4),
+)
+
+
 @dataclass(frozen=True)
 class ContractConfig:
     id: int
@@ -120,6 +131,23 @@ class ConfigRepository:
             cursor = conn.execute(
                 "INSERT INTO contracts(user_id, symbol, name) VALUES (?, ?, ?)",
                 (user_id, symbol.strip(), name.strip()),
+            )
+            conn.executemany(
+                """INSERT INTO period_configs(contract_id,label,duration_seconds,m4,m3,m2,m1,note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        cursor.lastrowid,
+                        period.label,
+                        period.duration_seconds,
+                        period.m4,
+                        period.m3,
+                        period.m2,
+                        period.m1,
+                        period.note,
+                    )
+                    for period in DEFAULT_PERIOD_CONFIGS
+                ],
             )
             row = conn.execute("SELECT id, symbol, name FROM contracts WHERE id = ?", (cursor.lastrowid,)).fetchone()
             return self._contract_from_row(conn, row)

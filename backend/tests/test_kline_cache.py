@@ -1,5 +1,5 @@
 from app.config import settings
-from app.services.repository import ConfigRepository, PeriodConfig
+from app.services.repository import DEFAULT_PERIOD_CONFIGS, ConfigRepository, PeriodConfig
 
 
 def test_kline_cache_persists_history_and_updates_the_current_bar(
@@ -55,13 +55,28 @@ def test_updating_contract_symbol_preserves_all_periods(monkeypatch, tmp_path) -
     assert updated is not None
     assert updated.id == contract.id
     assert updated.symbol == "DCE.PP2701"
-    assert [(period.label, period.m4, period.m3, period.m2, period.m1) for period in updated.periods] == [
-        ("日线", 180, 60, 21, 4),
-        ("2小时", 120, 60, 20, 5),
-    ]
+    assert len(updated.periods) == 7
+    periods = {period.duration_seconds: period for period in updated.periods}
+    assert (periods[86_400].label, periods[86_400].m4, periods[86_400].m3) == ("日线", 180, 60)
+    assert (periods[7_200].label, periods[7_200].m4, periods[7_200].m3) == ("2小时", 120, 60)
 
     assert repository.save_period_note("local", contract.id, 86_400, "等待突破") is True
     reloaded = ConfigRepository().get_contract("local", contract.id)
     assert reloaded is not None
     assert reloaded.periods[0].note == "等待突破"
-    assert reloaded.periods[1].note == ""
+    assert all(period.note == "" for period in reloaded.periods[1:])
+
+
+def test_new_contract_contains_all_default_periods(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    repository = ConfigRepository()
+
+    contract = repository.create_contract("local", "CZCE.FG609", "FG609")
+
+    assert [
+        (period.label, period.duration_seconds, period.m4, period.m3, period.m2, period.m1)
+        for period in contract.periods
+    ] == [
+        (period.label, period.duration_seconds, period.m4, period.m3, period.m2, period.m1)
+        for period in DEFAULT_PERIOD_CONFIGS
+    ]
