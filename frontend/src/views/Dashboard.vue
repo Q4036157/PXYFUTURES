@@ -62,10 +62,6 @@ interface ContractSuggestion {
   symbol: string
 }
 
-function signalText(signal: SignalSnapshot): string {
-  return signal.cross_type ? `${signal.cross_type}（${signal.label}）` : signal.label
-}
-
 function maText(name: 'M1' | 'M2' | 'M3' | 'M4'): string {
   const value = selectedSignal.value?.ma_values[name]
   return typeof value === 'number' ? value.toFixed(2) : '--'
@@ -406,7 +402,7 @@ onBeforeUnmount(() => {
       <div class="contract-list-wrap"><h2>交易合约</h2><table class="contract-table"><tbody><tr v-for="contract in contracts" :key="contract.id" :class="{ active: contract.id === selectedId }" @click="selectContract(contract.id)"><td>{{ contract.exchange }}</td><td><strong>{{ displayContractCode(contract.code) }}</strong></td><td class="contract-actions"><el-tooltip content="更换合约" placement="top"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /></el-tooltip><el-tooltip content="删除该合约" placement="top"><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></el-tooltip></td></tr></tbody></table><div v-if="!contracts.length" class="empty-list">添加合约后在这里查看</div></div>
       <div class="signal-area">
         <div v-if="errorText" class="data-error">{{ errorText }}</div>
-        <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td><span class="state" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''">{{ signalText(signal) }}</span></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
+        <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td class="signal-state-cell"><div class="state signal-state-layout" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''"><span>{{ signal.label }}</span><span class="cross-type">{{ signal.cross_type || '' }}</span></div></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
         <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
       </div>
     </section>
