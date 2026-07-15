@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+backend/.venv/
+backend/data/
+**/__pycache__/
+**/*.py[cod]
+backend/.pytest_cache/
+backend/.ruff_cache/
+frontend/node_modules/
+frontend/node_modules.incomplete/
+frontend/.node_modules-*/
+frontend/dist/
+frontend/*.tsbuildinfo
+/data/
+*.db
