@@ -1,6 +1,7 @@
 """智能期货 FastAPI 入口。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import auth, contracts, settings as settings_api, signals
 from app.config import settings
 from app.market.tq_client import TqClient
+from app.services.market_sync import run_market_sync_loop
 from app.services.repository import ConfigRepository
 
 settings.log_dir.mkdir(parents=True, exist_ok=True)
@@ -29,9 +31,22 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     app.state.config_repository = ConfigRepository()
     app.state.tq_client = TqClient()
+    app.state.market_sync_stop = asyncio.Event()
+    app.state.market_sync_task = asyncio.create_task(
+        run_market_sync_loop(
+            app.state.tq_client,
+            app.state.config_repository,
+            app.state.market_sync_stop,
+        ),
+        name="market-data-sync",
+    )
     logger.info("智能期货启动，认证模式：%s", "主平台 JWT" if settings.jwt_secret else "独立本地")
-    yield
-    app.state.tq_client.close()
+    try:
+        yield
+    finally:
+        app.state.market_sync_stop.set()
+        await app.state.market_sync_task
+        app.state.tq_client.close()
 
 
 app = FastAPI(title="貔貅元智能期货", version="0.1.0", lifespan=lifespan)

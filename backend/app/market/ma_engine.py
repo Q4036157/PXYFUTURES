@@ -92,19 +92,46 @@ def _short_series(closes: Sequence[float], period: int) -> list[float | None]:
     ]
 
 
-def _classify(cross_type: CrossType, price: float, m3: float, m4: float) -> str:
+def _classify(cross_type: CrossType, cross_value: float, m3: float, m4: float) -> str:
     lower, upper = sorted((m3, m4))
-    if price < lower:
+    if cross_value < lower:
         return "反弹" if cross_type == CrossType.GOLDEN else "下跌"
-    if price > upper:
+    if cross_value > upper:
         return "上涨" if cross_type == CrossType.GOLDEN else "回调"
+    if m3 > m4:
+        return "多震荡"
+    if m4 > m3:
+        return "空震荡"
     return "震荡"
+
+
+def _interpolate_cross(
+    m1_prev: float,
+    m2_prev: float,
+    m1_now: float,
+    m2_now: float,
+    m3_prev: float,
+    m3_now: float,
+    m4_prev: float,
+    m4_now: float,
+) -> tuple[float, float, float]:
+    """按图表相邻两点的线段，计算 M1/M2 交点及交点处的 M3/M4。"""
+    difference_prev = m1_prev - m2_prev
+    difference_now = m1_now - m2_now
+    denominator = difference_now - difference_prev
+    fraction = 1.0 if denominator == 0 else -difference_prev / denominator
+    fraction = min(1.0, max(0.0, fraction))
+
+    cross_value = m1_prev + fraction * (m1_now - m1_prev)
+    m3_at_cross = m3_prev + fraction * (m3_now - m3_prev)
+    m4_at_cross = m4_prev + fraction * (m4_now - m4_prev)
+    return cross_value, m3_at_cross, m4_at_cross
 
 
 def calculate_signal(bars: Sequence[Bar], config: MovingAverageConfig) -> SignalState:
     """从 K 线历史恢复当前状态。
 
-    交叉发生时根据该根 K 线收盘价相对 M3/M4 的位置确定分类，随后保持，
+    交叉发生时根据 M1/M2 实际交点相对 M3/M4 的位置确定分类，随后保持，
     直到反向交叉。因此无需把状态作为唯一事实持久化。
     """
     if len(bars) < config.required_bars:
@@ -132,8 +159,9 @@ def calculate_signal(bars: Sequence[Bar], config: MovingAverageConfig) -> Signal
     for index in range(1, len(bars)):
         m1_prev, m2_prev = series["M1"][index - 1], series["M2"][index - 1]
         m1_now, m2_now = series["M1"][index], series["M2"][index]
+        m3_prev, m4_prev = series["M3"][index - 1], series["M4"][index - 1]
         m3_now, m4_now = series["M3"][index], series["M4"][index]
-        if None in (m1_prev, m2_prev, m1_now, m2_now, m3_now, m4_now):
+        if None in (m1_prev, m2_prev, m1_now, m2_now, m3_prev, m4_prev, m3_now, m4_now):
             continue
         cross_type: CrossType | None = None
         if m1_prev <= m2_prev and m1_now > m2_now:
@@ -141,8 +169,18 @@ def calculate_signal(bars: Sequence[Bar], config: MovingAverageConfig) -> Signal
         elif m1_prev >= m2_prev and m1_now < m2_now:
             cross_type = CrossType.DEATH
         if cross_type is not None:
+            cross_value, m3_at_cross, m4_at_cross = _interpolate_cross(
+                float(m1_prev),
+                float(m2_prev),
+                float(m1_now),
+                float(m2_now),
+                float(m3_prev),
+                float(m3_now),
+                float(m4_prev),
+                float(m4_now),
+            )
             latest_cross = cross_type
-            latest_label = _classify(cross_type, bars[index].close, float(m3_now), float(m4_now))
+            latest_label = _classify(cross_type, cross_value, m3_at_cross, m4_at_cross)
             state_since_ns = bars[index].timestamp_ns
 
     return SignalState(

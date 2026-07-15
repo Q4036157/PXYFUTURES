@@ -1,5 +1,5 @@
 from app.config import settings
-from app.services.repository import ConfigRepository
+from app.services.repository import ConfigRepository, PeriodConfig
 
 
 def test_kline_cache_persists_history_and_updates_the_current_bar(
@@ -33,3 +33,35 @@ def test_kline_cache_persists_history_and_updates_the_current_bar(
     assert state is not None
     assert state.max_requested_bars == 300
     assert state.last_synced_at_ns == 2000
+
+
+def test_updating_contract_symbol_preserves_all_periods(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    repository = ConfigRepository()
+    contract = repository.create_contract("local", "DCE.PP2609", "PP2609")
+    repository.save_period(
+        "local",
+        contract.id,
+        PeriodConfig(id=None, label="日线", duration_seconds=86_400, m4=180, m3=60, m2=21, m1=4),
+    )
+    repository.save_period(
+        "local",
+        contract.id,
+        PeriodConfig(id=None, label="2小时", duration_seconds=7_200, m4=120, m3=60, m2=20, m1=5),
+    )
+
+    updated = repository.update_contract("local", contract.id, "DCE.PP2701", "PP2701")
+
+    assert updated is not None
+    assert updated.id == contract.id
+    assert updated.symbol == "DCE.PP2701"
+    assert [(period.label, period.m4, period.m3, period.m2, period.m1) for period in updated.periods] == [
+        ("日线", 180, 60, 21, 4),
+        ("2小时", 120, 60, 20, 5),
+    ]
+
+    assert repository.save_period_note("local", contract.id, 86_400, "等待突破") is True
+    reloaded = ConfigRepository().get_contract("local", contract.id)
+    assert reloaded is not None
+    assert reloaded.periods[0].note == "等待突破"
+    assert reloaded.periods[1].note == ""

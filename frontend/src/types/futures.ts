@@ -6,6 +6,7 @@ export interface PeriodConfig {
   m3: number
   m2: number
   m1: number
+  note: string
 }
 
 export interface ContractConfig {

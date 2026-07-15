@@ -18,6 +18,7 @@ class PeriodConfig:
     m3: int
     m2: int
     m1: int
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class ConfigRepository:
                     m3 INTEGER NOT NULL CHECK(m3 > 0),
                     m2 INTEGER NOT NULL CHECK(m2 > 0),
                     m1 INTEGER NOT NULL CHECK(m1 > 0),
+                    note TEXT NOT NULL DEFAULT '',
                     UNIQUE(contract_id, duration_seconds)
                 );
                 CREATE TABLE IF NOT EXISTS kline_bars (
@@ -87,11 +89,22 @@ class ConfigRepository:
                 );
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(period_configs)")}
+            if "note" not in columns:
+                conn.execute("ALTER TABLE period_configs ADD COLUMN note TEXT NOT NULL DEFAULT ''")
 
     def list_contracts(self, user_id: str) -> list[ContractConfig]:
         with self._connect() as conn:
             contracts = conn.execute(
                 "SELECT id, symbol, name FROM contracts WHERE user_id = ? ORDER BY symbol", (user_id,)
+            ).fetchall()
+            return [self._contract_from_row(conn, row) for row in contracts]
+
+    def list_all_contracts(self) -> list[ContractConfig]:
+        """供后台行情同步读取全部用户已添加的合约。"""
+        with self._connect() as conn:
+            contracts = conn.execute(
+                "SELECT id, symbol, name FROM contracts ORDER BY symbol, id"
             ).fetchall()
             return [self._contract_from_row(conn, row) for row in contracts]
 
@@ -109,6 +122,27 @@ class ConfigRepository:
                 (user_id, symbol.strip(), name.strip()),
             )
             row = conn.execute("SELECT id, symbol, name FROM contracts WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            return self._contract_from_row(conn, row)
+
+    def update_contract(
+        self,
+        user_id: str,
+        contract_id: int,
+        symbol: str,
+        name: str,
+    ) -> ContractConfig | None:
+        """原位更换合约代码，保留 contract_id 下的全部周期配置。"""
+        with self._connect() as conn:
+            updated = conn.execute(
+                "UPDATE contracts SET symbol = ?, name = ? WHERE id = ? AND user_id = ?",
+                (symbol.strip(), name.strip(), contract_id, user_id),
+            )
+            if updated.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT id, symbol, name FROM contracts WHERE id = ? AND user_id = ?",
+                (contract_id, user_id),
+            ).fetchone()
             return self._contract_from_row(conn, row)
 
     def delete_contract(self, user_id: str, contract_id: int) -> bool:
@@ -141,6 +175,22 @@ class ConfigRepository:
                 """DELETE FROM period_configs WHERE contract_id = ? AND duration_seconds = ?
                    AND EXISTS (SELECT 1 FROM contracts WHERE id = ? AND user_id = ?)""",
                 (contract_id, duration_seconds, contract_id, user_id),
+            ).rowcount > 0
+
+    def save_period_note(
+        self,
+        user_id: str,
+        contract_id: int,
+        duration_seconds: int,
+        note: str,
+    ) -> bool:
+        """保存单个合约周期的纯文本备注。"""
+        with self._connect() as conn:
+            return conn.execute(
+                """UPDATE period_configs SET note = ?
+                   WHERE contract_id = ? AND duration_seconds = ?
+                   AND EXISTS (SELECT 1 FROM contracts WHERE id = ? AND user_id = ?)""",
+                (note, contract_id, duration_seconds, contract_id, user_id),
             ).rowcount > 0
 
     def load_kline_bars(self, symbol: str, duration_seconds: int, count: int) -> list[tuple[int, float]]:
@@ -214,5 +264,5 @@ class ConfigRepository:
     def _period_from_row(row: sqlite3.Row) -> PeriodConfig:
         return PeriodConfig(
             id=row["id"], label=row["label"], duration_seconds=row["duration_seconds"],
-            m4=row["m4"], m3=row["m3"], m2=row["m2"], m1=row["m1"],
+            m4=row["m4"], m3=row["m3"], m2=row["m2"], m1=row["m1"], note=row["note"],
         )

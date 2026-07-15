@@ -9,21 +9,30 @@ import type { ContractConfig, ContractSignals, PeriodConfig, SignalSnapshot } fr
 const contracts = ref<ContractConfig[]>([])
 const selectedId = ref<number | null>(null)
 const signals = ref<SignalSnapshot[]>([])
+const periodNotes = ref<Record<number, string>>({})
 const selectedDuration = ref<number | null>(null)
 const refreshing = ref(false)
 const errorText = ref('')
 const adding = ref(false)
+const changingContract = ref(false)
 const suggestionLoading = ref(false)
 const addVisible = ref(false)
+const contractEditVisible = ref(false)
 const periodVisible = ref(false)
 const credentialsVisible = ref(false)
 const editPeriod = ref<PeriodConfig | null>(null)
+const editingContract = ref<ContractConfig | null>(null)
 const form = ref({ exchange: '', code: '', name: '' })
-const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 120, m3: 60, m2: 20, m1: 5 })
+const contractEditForm = ref({ exchange: '', code: '', name: '' })
+const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 })
 const credentials = ref({ username: '', password: '' })
 let timer: number | undefined
 let signalAbortController: AbortController | null = null
 let refreshingContractId: number | null = null
+const dirtyNoteDurations = new Set<number>()
+const savingNoteKeys = new Set<string>()
+const pendingNoteValues = new Map<string, string>()
+const noteSaveTimers = new Map<string, number>()
 
 const commonPeriods = [
   { label: '日线', durationSeconds: 86400 },
@@ -44,6 +53,7 @@ const selectedSignal = computed(() => (
   || null
 ))
 const recognition = computed(() => recognizeContract(form.value.code))
+const contractEditRecognition = computed(() => recognizeContract(contractEditForm.value.code))
 
 interface ContractSuggestion {
   value: string
@@ -76,6 +86,79 @@ function displayContractCode(code: string): string {
   return /^V\d/.test(code) ? `PVC${code.slice(1)}` : code
 }
 
+function syncPeriodNotes(items: SignalSnapshot[]): void {
+  for (const signal of items) {
+    const duration = signal.period.duration_seconds
+    if (!dirtyNoteDurations.has(duration)) {
+      periodNotes.value[duration] = signal.period.note || ''
+    }
+  }
+}
+
+function noteKey(contractId: number, durationSeconds: number): string {
+  return `${contractId}:${durationSeconds}`
+}
+
+async function persistPeriodNote(
+  contractId: number,
+  durationSeconds: number,
+  note: string,
+): Promise<void> {
+  const key = noteKey(contractId, durationSeconds)
+  if (savingNoteKeys.has(key)) {
+    pendingNoteValues.set(key, note)
+    return
+  }
+  savingNoteKeys.add(key)
+  try {
+    await client.put(`/contracts/${contractId}/periods/${durationSeconds}/note`, { note })
+    if (selectedId.value === contractId && periodNotes.value[durationSeconds] === note) {
+      dirtyNoteDurations.delete(durationSeconds)
+      const signal = signals.value.find((item) => item.period.duration_seconds === durationSeconds)
+      if (signal) signal.period.note = note
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '备注保存失败')
+  } finally {
+    savingNoteKeys.delete(key)
+    const pendingNote = pendingNoteValues.get(key)
+    if (pendingNote !== undefined) {
+      pendingNoteValues.delete(key)
+      if (pendingNote !== note) void persistPeriodNote(contractId, durationSeconds, pendingNote)
+    }
+  }
+}
+
+function schedulePeriodNoteSave(signal: SignalSnapshot, value: string): void {
+  const contractId = selectedId.value
+  if (!contractId) return
+  const duration = signal.period.duration_seconds
+  const key = noteKey(contractId, duration)
+  periodNotes.value[duration] = value
+  dirtyNoteDurations.add(duration)
+  const previousTimer = noteSaveTimers.get(key)
+  if (previousTimer) window.clearTimeout(previousTimer)
+  const timer = window.setTimeout(() => {
+    noteSaveTimers.delete(key)
+    void persistPeriodNote(contractId, duration, value)
+  }, 600)
+  noteSaveTimers.set(key, timer)
+}
+
+function flushPeriodNote(signal: SignalSnapshot): void {
+  const contractId = selectedId.value
+  if (!contractId) return
+  const duration = signal.period.duration_seconds
+  if (!dirtyNoteDurations.has(duration)) return
+  const key = noteKey(contractId, duration)
+  const timer = noteSaveTimers.get(key)
+  if (timer) {
+    window.clearTimeout(timer)
+    noteSaveTimers.delete(key)
+  }
+  void persistPeriodNote(contractId, duration, periodNotes.value[duration] || '')
+}
+
 async function fetchContractSuggestions(
   query: string,
   callback: (items: ContractSuggestion[]) => void,
@@ -100,6 +183,27 @@ function selectContractSuggestion(item: ContractSuggestion): void {
   form.value.exchange = item.exchange
 }
 
+function openContractEdit(contract: ContractConfig): void {
+  editingContract.value = contract
+  contractEditForm.value = {
+    exchange: contract.exchange,
+    code: displayContractCode(contract.code),
+    name: contract.name,
+  }
+  contractEditVisible.value = true
+}
+
+function handleContractEditCodeInput(): void {
+  const result = recognizeContract(contractEditForm.value.code)
+  contractEditForm.value.code = contractEditForm.value.code.replace(/\s+/g, '').toUpperCase()
+  if (result.exchange) contractEditForm.value.exchange = result.exchange
+}
+
+function selectContractEditSuggestion(item: ContractSuggestion): void {
+  contractEditForm.value.code = item.display
+  contractEditForm.value.exchange = item.exchange
+}
+
 async function loadContracts(): Promise<void> {
   const { data } = await client.get<ContractConfig[]>('/contracts')
   contracts.value = data
@@ -111,6 +215,8 @@ async function loadContracts(): Promise<void> {
 async function selectContract(id: number): Promise<void> {
   selectedId.value = id
   signals.value = []
+  periodNotes.value = {}
+  dirtyNoteDurations.clear()
   selectedDuration.value = null
   await refreshSignals()
 }
@@ -131,6 +237,7 @@ async function refreshSignals(): Promise<void> {
     })
     if (selectedId.value !== contractId || signalAbortController !== controller) return
     signals.value = data.signals
+    syncPeriodNotes(data.signals)
     if (!data.signals.some((signal) => signal.period.duration_seconds === selectedDuration.value)) {
       selectedDuration.value = data.signals[0]?.period.duration_seconds || null
     }
@@ -165,6 +272,31 @@ async function createContract(): Promise<void> {
   }
 }
 
+async function updateContract(): Promise<void> {
+  const contract = editingContract.value
+  if (!contract || !contractEditRecognition.value.complete || changingContract.value) {
+    ElMessage.warning('请选择完整的当前可用合约，例如 PP2701')
+    return
+  }
+  changingContract.value = true
+  try {
+    const { data } = await client.put<ContractConfig>(`/contracts/${contract.id}`, contractEditForm.value)
+    const index = contracts.value.findIndex((item) => item.id === contract.id)
+    if (index >= 0) contracts.value[index] = data
+    contractEditVisible.value = false
+    editingContract.value = null
+    if (selectedId.value === contract.id) {
+      signals.value = []
+      await refreshSignals()
+    }
+    ElMessage.success(`已更换为 ${displayContractCode(data.code)}，原周期配置已保留`)
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '更换合约失败')
+  } finally {
+    changingContract.value = false
+  }
+}
+
 function handleContractCodeInput(): void {
   const result = recognizeContract(form.value.code)
   // 保留用户输入的 PVC/PV 显示名，只规范大小写；提交时由后端转为数据源标准代码 V。
@@ -176,7 +308,7 @@ function openPeriod(period?: PeriodConfig): void {
   editPeriod.value = period || null
   periodForm.value = period
     ? { label: period.label, duration_seconds: period.duration_seconds, m4: period.m4, m3: period.m3, m2: period.m2, m1: period.m1 }
-    : { label: '日线', duration_seconds: 86400, m4: 120, m3: 60, m2: 20, m1: 5 }
+    : { label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 }
   periodVisible.value = true
 }
 
@@ -241,6 +373,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
   signalAbortController?.abort()
+  for (const signal of signals.value) flushPeriodNote(signal)
+  for (const noteTimer of noteSaveTimers.values()) window.clearTimeout(noteTimer)
 })
 </script>
 
@@ -269,10 +403,10 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="monitor-section">
-      <div class="contract-list-wrap"><h2>交易合约</h2><table class="contract-table"><tbody><tr v-for="contract in contracts" :key="contract.id" :class="{ active: contract.id === selectedId }" @click="selectContract(contract.id)"><td>{{ contract.exchange }}</td><td><strong>{{ displayContractCode(contract.code) }}</strong></td><td class="contract-delete"><el-tooltip content="删除该合约" placement="right"><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></el-tooltip></td></tr></tbody></table><div v-if="!contracts.length" class="empty-list">添加合约后在这里查看</div></div>
+      <div class="contract-list-wrap"><h2>交易合约</h2><table class="contract-table"><tbody><tr v-for="contract in contracts" :key="contract.id" :class="{ active: contract.id === selectedId }" @click="selectContract(contract.id)"><td>{{ contract.exchange }}</td><td><strong>{{ displayContractCode(contract.code) }}</strong></td><td class="contract-actions"><el-tooltip content="更换合约" placement="top"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /></el-tooltip><el-tooltip content="删除该合约" placement="top"><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></el-tooltip></td></tr></tbody></table><div v-if="!contracts.length" class="empty-list">添加合约后在这里查看</div></div>
       <div class="signal-area">
         <div v-if="errorText" class="data-error">{{ errorText }}</div>
-        <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td><span class="state" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''">{{ signalText(signal) }}</span></td></tr></tbody></table>
+        <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td><span class="state" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''">{{ signalText(signal) }}</span></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
         <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
       </div>
     </section>
@@ -282,6 +416,11 @@ onBeforeUnmount(() => {
     <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close>
       <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item></el-form>
       <template #footer><el-button :disabled="adding" @click="addVisible = false">取消</el-button><el-button type="primary" :loading="adding" @click="createContract">验证并添加</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="contractEditVisible" title="更换合约" width="420px" destroy-on-close>
+      <el-form label-position="top" @submit.prevent="updateContract"><el-form-item label="新合约代码"><el-autocomplete v-model="contractEditForm.code" class="full-width" value-key="value" placeholder="例如 pp 或 PP2701" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractEditCodeInput" @select="selectContractEditSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: contractEditForm.code && !contractEditRecognition.exchange, incomplete: contractEditRecognition.exchange && !contractEditRecognition.complete }"><template v-if="contractEditRecognition.exchange && contractEditRecognition.complete">已识别：{{ contractEditRecognition.exchangeName }} {{ contractEditRecognition.exchange }} · {{ contractEditRecognition.code }}</template><template v-else-if="contractEditRecognition.exchange">请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="contractEditForm.code">未识别品种代码，请检查品种简称和月份。</template></div></el-form-item></el-form>
+      <template #footer><el-button :disabled="changingContract" @click="contractEditVisible = false">取消</el-button><el-button type="primary" :loading="changingContract" @click="updateContract">验证并更换</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="periodVisible" class="period-dialog" :title="editPeriod ? '编辑周期' : '配置周期'" width="640px" destroy-on-close>
