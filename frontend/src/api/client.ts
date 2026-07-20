@@ -12,6 +12,10 @@ export function consumeHostToken(): string | null {
   return token
 }
 
+export function isHostSession(): boolean {
+  return Boolean(sessionStorage.getItem(HOST_TOKEN_KEY))
+}
+
 export const client = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   timeout: 30_000,

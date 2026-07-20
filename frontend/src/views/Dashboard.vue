@@ -2,11 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { client } from '@/api/client'
+import { useRouter } from 'vue-router'
+import { clearLocalToken, client, isHostSession } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
 import type { ContractConfig, ContractSignals, PeriodConfig, SignalSnapshot } from '@/types/futures'
 
 const contracts = ref<ContractConfig[]>([])
+const router = useRouter()
 const selectedId = ref<number | null>(null)
 const signals = ref<SignalSnapshot[]>([])
 const periodNotes = ref<Record<number, string>>({})
@@ -384,8 +386,18 @@ onMounted(async () => {
     await loadContracts()
     timer = window.setInterval(() => void refreshSignals(), 3_000)
   } catch (error: any) {
-    if (error.response?.status === 401) window.location.href = '/login'
-    else errorText.value = error.response?.data?.detail || '加载合约失败'
+    if (error.response?.status === 401) {
+      if (isHostSession()) {
+        const loginUrl = `/login?redirect=${encodeURIComponent('/platform/apps/futures')}`
+        const targetWindow = window.top ?? window
+        targetWindow.location.replace(loginUrl)
+      } else {
+        clearLocalToken()
+        await router.replace('/login')
+      }
+      return
+    }
+    errorText.value = error.response?.data?.detail || '加载合约失败'
   }
 })
 
