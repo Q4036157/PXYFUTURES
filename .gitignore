@@ -16,3 +16,4 @@ frontend/*.tsbuildinfo
 *.db
 /packaging/build/
 /release/
+/.tmp/
