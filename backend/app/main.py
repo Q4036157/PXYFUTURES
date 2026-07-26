@@ -45,7 +45,8 @@ async def lifespan(app: FastAPI):
         ),
         name="market-data-sync",
     )
-    logger.info("智能期货启动，认证模式：%s", "主平台 JWT" if settings.jwt_secret else "独立本地")
+    from app.services import auth as auth_service
+    logger.info("智能期货启动，认证模式：%s", auth_service.auth_mode())
     try:
         yield
     finally:

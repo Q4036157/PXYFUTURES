@@ -2,12 +2,12 @@ schema_version: 1
 id: futures
 name: 智能期货
 kind: web_app
-runtime: systemd-python
+runtime: windows-winsw-or-supervisor
 target_runtime: windows-winsw
 primary_node: app-win-01
-current_runtime_node: app-204
+current_runtime_node: app-win-01
 fallback_node: app-204
-migration_status: preparing
+migration_status: active_caddy_manual
 service_name: pxyfutures.service
 local_root: D:/x1/x2/PXYFUTURES
 remote_root: /root/pxyfutures
@@ -16,9 +16,9 @@ internal_port: 3022
 public_path: /futures-app/
 health_path: /health
 display_mode: iframe
-auth_mode: shared_jwt
+auth_mode: app_session
 target_auth_mode: platform_app_session
-auth_migration: short_lived_app_ticket_required
+auth_migration: app_session_implemented_pending_109_secret_sync
 data_path: D:/x1/pxy-runtime/PXYFUTURES/data
 secrets_file: /root/pxyfutures/.env
 logs: journald

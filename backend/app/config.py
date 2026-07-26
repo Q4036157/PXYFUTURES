@@ -16,7 +16,10 @@ class Settings(BaseSettings):
     port: int = 3022
     log_level: str = "INFO"
     data_dir: Path = Path("./data")
+    # 遗留：主平台完整 JWT 密钥。本机体验节点不应配置此项。
     jwt_secret: str = ""
+    # 推荐：与 109 的 DAA_APP_SESSION_SECRET 相同的短时应用票据密钥。
+    app_session_secret: str = ""
     tq_user_name: str = ""
     tq_password: str = ""
 
@@ -36,6 +39,11 @@ class Settings(BaseSettings):
                 else Path(__file__).resolve().parents[2]
             )
             self.data_dir = (base_dir / self.data_dir).resolve()
+        # 兼容单独使用 DAA_APP_SESSION_SECRET 环境变量名。
+        if not self.app_session_secret.strip():
+            import os
+
+            self.app_session_secret = os.getenv("DAA_APP_SESSION_SECRET", "").strip()
 
 
 settings = Settings()

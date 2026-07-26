@@ -1,4 +1,4 @@
-"""集成主平台 JWT 与独立部署本地会话认证。"""
+"""集成主平台短时应用票据、遗留 JWT 与独立部署本地会话认证。"""
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +16,8 @@ from app.config import settings
 
 _PBKDF2_ITERATIONS = 200_000
 _LOCAL_USER_ID = "local-user"
+_APP_ID = "futures"
+_SESSION_COOKIE = "pxy_futures_session"
 
 
 def _auth_path() -> Path:
@@ -43,8 +45,17 @@ def _save_auth(value: dict[str, object]) -> None:
         pass
 
 
-def is_integrated_mode() -> bool:
+def is_app_session_mode() -> bool:
+    return bool(settings.app_session_secret.strip())
+
+
+def is_legacy_jwt_mode() -> bool:
     return bool(settings.jwt_secret.strip())
+
+
+def is_integrated_mode() -> bool:
+    """是否接入主平台（短时票据或遗留 JWT）。"""
+    return is_app_session_mode() or is_legacy_jwt_mode()
 
 
 def is_local_password_configured() -> bool:
@@ -78,26 +89,63 @@ def login_local(password: str) -> str | None:
 
 
 def auth_mode() -> str:
-    return "jwt" if is_integrated_mode() else "local"
+    if is_app_session_mode():
+        return "app_session"
+    if is_legacy_jwt_mode():
+        return "jwt"
+    return "local"
 
 
-def _bearer_token(request: Request) -> str:
+def _extract_token(request: Request) -> str | None:
     prefix, _, value = request.headers.get("Authorization", "").partition(" ")
-    if prefix.lower() != "bearer" or not value:
-        raise HTTPException(status_code=401, detail="缺少登录凭据")
-    return value
+    if prefix.lower() == "bearer" and value.strip():
+        return value.strip()
+    cookie = request.cookies.get(_SESSION_COOKIE, "").strip()
+    return cookie or None
+
+
+def _decode_app_session(token: str) -> str | None:
+    secret = settings.app_session_secret.strip()
+    if not secret:
+        return None
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except JWTError:
+        return None
+    if payload.get("type") != "app_session":
+        return None
+    if payload.get("app_id") != _APP_ID:
+        return None
+    user_id = payload.get("sub")
+    return str(user_id) if user_id else None
+
+
+def _decode_legacy_platform_access(token: str) -> str | None:
+    secret = settings.jwt_secret.strip()
+    if not secret:
+        return None
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except JWTError:
+        return None
+    if payload.get("type") not in (None, "access") or not payload.get("sub"):
+        return None
+    return str(payload["sub"])
 
 
 async def current_user_id(request: Request) -> str:
-    token = _bearer_token(request)
+    token = _extract_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少登录凭据")
+
     if is_integrated_mode():
-        try:
-            payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-        except JWTError as exc:
-            raise HTTPException(status_code=401, detail="主平台登录已失效") from exc
-        if payload.get("type") not in (None, "access") or not payload.get("sub"):
-            raise HTTPException(status_code=401, detail="无效的主平台令牌")
-        return str(payload["sub"])
+        user_id = _decode_app_session(token)
+        if user_id:
+            return user_id
+        user_id = _decode_legacy_platform_access(token)
+        if user_id:
+            return user_id
+        raise HTTPException(status_code=401, detail="主平台登录已失效")
 
     session = _load_auth().get("sessions", {})
     expires_at = session.get(token) if isinstance(session, dict) else None

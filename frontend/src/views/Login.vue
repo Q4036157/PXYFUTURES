@@ -11,7 +11,7 @@ const submitting = ref(false)
 
 onMounted(async () => {
   const { data } = await client.get<{ mode: string; configured: boolean }>('/auth/status')
-  if (data.mode === 'jwt') {
+  if (data.mode === 'jwt' || data.mode === 'app_session') {
     await router.replace('/')
     return
   }

@@ -23,9 +23,10 @@ export const client = axios.create({
 })
 
 client.interceptors.request.use((config) => {
-  // 集成主平台时优先复用其登录态；独立部署时使用本项目的本地会话。
-  const token = localStorage.getItem('token')
-    || sessionStorage.getItem(HOST_TOKEN_KEY)
+  // 体验站由主平台下发 app_session；它比主平台完整 access token 优先。
+  // 后者不能由本机期货服务验证，若优先发送会导致 401 并回到登录页。
+  const token = sessionStorage.getItem(HOST_TOKEN_KEY)
+    || localStorage.getItem('token')
     || localStorage.getItem(LOCAL_TOKEN_KEY)
   if (token) config.headers.Authorization = `Bearer ${token}`
   return config

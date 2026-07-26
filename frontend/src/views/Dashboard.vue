@@ -28,6 +28,7 @@ const form = ref({ exchange: '', code: '', name: '' })
 const contractEditForm = ref({ exchange: '', code: '', name: '' })
 const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 })
 const credentials = ref({ username: '', password: '' })
+const canManageTqCredentials = !isHostSession()
 let timer: number | undefined
 interface RequestController {
   readonly aborted: boolean
@@ -415,7 +416,7 @@ onBeforeUnmount(() => {
       <div><h1>智能期货</h1><span>多周期均线分布</span></div>
       <div class="topbar-actions">
         <el-button :icon="Refresh" :loading="refreshing" plain @click="refreshSignals">更新数据</el-button>
-        <el-button :icon="Setting" plain @click="credentialsVisible = true">天勤账号</el-button>
+        <el-button v-if="canManageTqCredentials" :icon="Setting" plain @click="credentialsVisible = true">天勤账号</el-button>
         <el-button type="primary" :icon="Plus" @click="addVisible = true">添加合约</el-button>
       </div>
     </header>
@@ -458,7 +459,7 @@ onBeforeUnmount(() => {
       <template #footer><el-button @click="periodVisible = false">取消</el-button><el-button type="primary" @click="savePeriod">保存</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="credentialsVisible" title="天勤账号" width="420px" destroy-on-close>
+    <el-dialog v-if="canManageTqCredentials" v-model="credentialsVisible" title="天勤账号" width="420px" destroy-on-close>
       <el-form label-position="top" @submit.prevent="saveCredentials"><el-form-item label="用户名"><el-input v-model="credentials.username" autocomplete="username" /></el-form-item><el-form-item label="密码"><el-input v-model="credentials.password" type="password" show-password autocomplete="current-password" /></el-form-item></el-form>
       <template #footer><el-button @click="credentialsVisible = false">取消</el-button><el-button type="primary" @click="saveCredentials">保存</el-button></template>
     </el-dialog>
