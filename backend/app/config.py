@@ -16,9 +16,7 @@ class Settings(BaseSettings):
     port: int = 3022
     log_level: str = "INFO"
     data_dir: Path = Path("./data")
-    # 遗留：主平台完整 JWT 密钥。本机体验节点不应配置此项。
-    jwt_secret: str = ""
-    # 推荐：与 109 的 DAA_APP_SESSION_SECRET 相同的短时应用票据密钥。
+    # 必须与 PXYLH 的 DAA_APP_SESSION_SECRET 相同。
     app_session_secret: str = ""
     tq_user_name: str = ""
     tq_password: str = ""

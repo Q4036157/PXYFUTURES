@@ -1,31 +1,9 @@
 @echo off
-setlocal EnableExtensions
 chcp 65001 >nul 2>&1
-title QIHUO 204 Server Logs
+title 智能期货 204 代理提示
 
-set "SERVER=root@43.167.9.204"
-set "SERVICE=pxyfutures.service"
-
-where ssh.exe >nul 2>&1
-if errorlevel 1 goto missing_ssh
-
-echo ============================================================
-echo   QIHUO 204 live server logs
-echo   Service: %SERVICE%
-echo   Press Ctrl+C to stop
-echo ============================================================
+echo 智能期货不再运行在 204，204 仅反向代理工作站 app-win-01。
+echo 请查看工作站服务 pxy-futures 的日志，避免误查已停用的 pxyfutures.service。
 echo.
-
-ssh.exe -tt -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 %SERVER% "journalctl -u %SERVICE% -n 100 -f --no-pager"
-set "EXIT_CODE=%ERRORLEVEL%"
-
-echo.
-echo Log connection ended. Exit code: %EXIT_CODE%
 pause
-exit /b %EXIT_CODE%
-
-:missing_ssh
-echo.
-echo ssh.exe was not found. Enable the Windows OpenSSH client first.
-pause
-exit /b 1
+exit /b 0

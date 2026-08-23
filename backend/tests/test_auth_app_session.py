@@ -1,4 +1,4 @@
-"""短时应用票据与遗留 JWT 兼容性测试。"""
+"""主平台短时应用票据认证测试。"""
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +35,6 @@ def _make_request(headers: dict[str, str] | None = None) -> "object":
 def test_app_session_bearer_accepted(monkeypatch):
     secret = "test-app-session-secret"
     monkeypatch.setattr(settings, "app_session_secret", secret)
-    monkeypatch.setattr(settings, "jwt_secret", "")
     token = jwt.encode(
         {
             "sub": "user-42",
@@ -54,7 +53,6 @@ def test_app_session_bearer_accepted(monkeypatch):
 def test_app_session_cookie_accepted(monkeypatch):
     secret = "test-app-session-secret"
     monkeypatch.setattr(settings, "app_session_secret", secret)
-    monkeypatch.setattr(settings, "jwt_secret", "")
     token = jwt.encode(
         {
             "sub": "user-9",
@@ -72,7 +70,6 @@ def test_app_session_cookie_accepted(monkeypatch):
 def test_wrong_app_id_rejected(monkeypatch):
     secret = "test-app-session-secret"
     monkeypatch.setattr(settings, "app_session_secret", secret)
-    monkeypatch.setattr(settings, "jwt_secret", "")
     token = jwt.encode(
         {
             "sub": "user-42",
@@ -89,18 +86,26 @@ def test_wrong_app_id_rejected(monkeypatch):
     assert exc.value.status_code == 401
 
 
-def test_legacy_access_still_works_when_configured(monkeypatch):
-    secret = "legacy-platform-jwt"
-    monkeypatch.setattr(settings, "jwt_secret", secret)
+def test_missing_app_session_secret_returns_service_unavailable(monkeypatch):
     monkeypatch.setattr(settings, "app_session_secret", "")
+    request = _make_request({"Authorization": "Bearer invalid-token"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(auth.current_user_id(request))
+    assert exc.value.status_code == 503
+
+
+def test_legacy_access_token_is_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "app_session_secret", "shared-app-session-secret")
     token = jwt.encode(
         {
             "sub": "user-7",
             "type": "access",
             "exp": datetime.now(timezone.utc) + timedelta(hours=1),
         },
-        secret,
+        "legacy-platform-secret",
         algorithm="HS256",
     )
     request = _make_request({"Authorization": f"Bearer {token}"})
-    assert asyncio.run(auth.current_user_id(request)) == "user-7"
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(auth.current_user_id(request))
+    assert exc.value.status_code == 401
