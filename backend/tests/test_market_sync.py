@@ -1,7 +1,11 @@
 import asyncio
 
 from app.market.tq_client import MarketBars
-from app.services.market_sync import build_market_sync_jobs, run_market_sync_loop, sync_all_market_data
+from app.services.market_sync import (
+    build_market_sync_jobs,
+    run_market_sync_loop,
+    sync_all_market_data,
+)
 from app.services.repository import ContractConfig, PeriodConfig
 
 
@@ -43,7 +47,8 @@ def test_sync_failure_does_not_block_later_jobs() -> None:
             ]
 
     class Client:
-        calls: list[str] = []
+        def __init__(self) -> None:
+            self.calls: list[str] = []
 
         def fetch_bars(self, symbol: str, *args: object) -> MarketBars:
             self.calls.append(symbol)

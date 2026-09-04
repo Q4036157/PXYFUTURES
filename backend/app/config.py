@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     def log_file(self) -> Path:
         return self.log_dir / "pxyfutures.log"
 
-    def model_post_init(self, __context: object) -> None:
+    def model_post_init(self, __context: object, /) -> None:
         if not self.data_dir.is_absolute():
             base_dir = (
                 Path(sys.executable).resolve().parent

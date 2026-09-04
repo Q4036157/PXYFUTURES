@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.5", "pyinstaller>=6.0,<7"]
+dev = ["pytest>=8.0", "ruff==0.16.6", "pyinstaller>=6.0,<7"]
 
 [build-system]
 requires = ["hatchling"]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -12,7 +12,7 @@ from app.config import settings
 from app.services import auth
 
 
-def _make_request(headers: dict[str, str] | None = None) -> "object":
+def _make_request(headers: dict[str, str] | None = None) -> object:
     from starlette.requests import Request
 
     header_list = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
@@ -40,7 +40,7 @@ def test_app_session_bearer_accepted(monkeypatch):
             "sub": "user-42",
             "app_id": "futures",
             "type": "app_session",
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
         },
         secret,
         algorithm="HS256",
@@ -58,7 +58,7 @@ def test_app_session_cookie_accepted(monkeypatch):
             "sub": "user-9",
             "app_id": "futures",
             "type": "app_session",
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
         },
         secret,
         algorithm="HS256",
@@ -75,7 +75,7 @@ def test_wrong_app_id_rejected(monkeypatch):
             "sub": "user-42",
             "app_id": "daa",
             "type": "app_session",
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
         },
         secret,
         algorithm="HS256",
@@ -100,7 +100,7 @@ def test_legacy_access_token_is_rejected(monkeypatch):
         {
             "sub": "user-7",
             "type": "access",
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
         },
         "legacy-platform-secret",
         algorithm="HS256",

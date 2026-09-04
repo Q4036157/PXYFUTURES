@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, contracts, settings as settings_api, signals
+from app.api import auth, contracts, signals
+from app.api import settings as settings_api
 from app.config import settings
 from app.market.tq_client import TqClient
 from app.services.market_sync import run_market_sync_loop
@@ -86,5 +87,5 @@ if _static_dir.exists():
         app.mount("/assets", StaticFiles(directory=_static_dir / "assets"), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa_fallback(full_path: str) -> FileResponse:  # noqa: ARG001
+    async def spa_fallback(full_path: str) -> FileResponse:
         return FileResponse(_static_dir / "index.html", headers={"Cache-Control": "no-store"})

@@ -73,7 +73,7 @@ class TqClient:
         try:
             self._api = TqApi(auth=TqAuth(username, password))
             return self._api
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("天勤连接失败")
             raise MarketDataUnavailable("天勤连接失败，请检查账号、密码和网络") from exc
 
@@ -180,7 +180,7 @@ class TqClient:
                             symbol, tq_symbol, count, len(remote_bars),
                         )
                 return MarketBars(self._bars_from_rows(cached), "live", synced_at_ns)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._remote_retry_after_monotonic = monotonic() + 30
                 if cached:
                     logger.warning(
@@ -236,7 +236,7 @@ class TqClient:
             tq_symbol = to_tq_symbol(symbol)
             try:
                 quote = api.get_quote(tq_symbol)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.info("天勤合约验证失败: symbol=%s tq_symbol=%s", symbol, tq_symbol, exc_info=True)
                 raise MarketDataUnavailable(
                     f"暂时无法验证 {symbol} 是否可用，请检查天勤连接后重试"
@@ -265,7 +265,7 @@ class TqClient:
                     product_id=to_tq_product(normalized_exchange, normalized_product),
                     expired=False,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.info(
                     "天勤合约列表查询失败: exchange=%s product=%s",
                     normalized_exchange,
@@ -284,7 +284,7 @@ class TqClient:
             if self._api is not None:
                 try:
                     self._api.close()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning("关闭天勤连接失败", exc_info=True)
                 finally:
                     self._api = None

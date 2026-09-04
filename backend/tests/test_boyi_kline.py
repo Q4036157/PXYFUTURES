@@ -1,7 +1,6 @@
 from app.market.boyi_kline import rebuild_boyi_bars
 from app.market.ma_engine import Bar
 
-
 MINUTE_NS = 60 * 1_000_000_000
 
 
