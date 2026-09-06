@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from app.market.tq_client import ContractUnavailable, TqClient
+from app.market.tq_client import ContractUnavailable, TqClient, _TqConnectionNoticeLimiter
 from app.services.repository import KlineSyncState
 
 
@@ -13,7 +13,9 @@ class FakeKlineApi:
         self.wait_update_deadline: float | None = None
         self.request: tuple[str, int, int] | None = None
 
-    def get_kline_serial(self, symbol: str, duration_seconds: int, data_length: int) -> pd.DataFrame:
+    def get_kline_serial(
+        self, symbol: str, duration_seconds: int, data_length: int
+    ) -> pd.DataFrame:
         self.request = (symbol, duration_seconds, data_length)
         return pd.DataFrame(
             [
@@ -71,7 +73,9 @@ class FakeKlineCache:
         self.state: KlineSyncState | None = None
         self.saved_request_count: int | None = None
 
-    def load_kline_bars(self, symbol: str, duration_seconds: int, count: int) -> list[tuple[int, float]]:
+    def load_kline_bars(
+        self, symbol: str, duration_seconds: int, count: int
+    ) -> list[tuple[int, float]]:
         return self.rows[-count:]
 
     def get_kline_sync_state(self, symbol: str, duration_seconds: int) -> KlineSyncState | None:
@@ -92,6 +96,35 @@ class FakeKlineCache:
         self.saved_request_count = requested_count
 
 
+def test_tq_connection_notices_are_rate_limited(caplog: pytest.LogCaptureFixture) -> None:
+    now = [0.0]
+    limiter = _TqConnectionNoticeLimiter(interval_seconds=900, clock=lambda: now[0])
+    url = "wss://free-api.shinnytech.com/t/nfmd/front/mobile"
+
+    with caplog.at_level("INFO", logger="app.market.tq_client"):
+        assert limiter.handle(f"通知 : 开始与 {url} 重新建立网络连接", "WARNING")
+        assert limiter.handle(
+            f"通知 : 与 {url} 的网络连接断开，请检查客户端及网络是否正常", "WARNING"
+        )
+        assert limiter.handle(
+            f"通知 : 与 {url} 的网络连接断开，请检查客户端及网络是否正常", "WARNING"
+        )
+        assert limiter.handle(f"通知 : 与 {url} 的网络连接已恢复", "WARNING")
+        assert limiter.handle(f"通知 : 与 {url} 的网络连接已恢复", "WARNING")
+
+        now[0] = 901
+        assert limiter.handle(
+            f"通知 : 与 {url} 的网络连接断开，请检查客户端及网络是否正常", "WARNING"
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        f"天勤行情连接断开: {url}",
+        f"天勤行情连接恢复: {url}",
+        f"天勤行情连接断开: {url}，已抑制 1 条重复提示",
+    ]
+
+
 def test_fetch_bars_includes_latest_bar_and_persists_it(monkeypatch: pytest.MonkeyPatch) -> None:
     api = FakeKlineApi()
     client = TqClient()
@@ -105,7 +138,11 @@ def test_fetch_bars_includes_latest_bar_and_persists_it(monkeypatch: pytest.Monk
     assert api.wait_update_calls == 1
     assert api.wait_update_deadline is not None
     assert result.source == "live"
-    assert [(bar.timestamp_ns, bar.close) for bar in result.bars] == [(1, 100.0), (2, 101.0), (3, 102.0)]
+    assert [(bar.timestamp_ns, bar.close) for bar in result.bars] == [
+        (1, 100.0),
+        (2, 101.0),
+        (3, 102.0),
+    ]
     assert cache.rows == [(1, 100.0), (2, 101.0), (3, 102.0)]
 
 
@@ -123,7 +160,11 @@ def test_fetch_bars_uses_cache_without_calling_tianqin_when_remote_is_unavailabl
     assert result.source == "cache"
     assert result.updated_at_ns == 123
     assert api.request is None
-    assert [(bar.timestamp_ns, bar.close) for bar in result.bars] == [(1, 100.0), (2, 101.0), (3, 102.0)]
+    assert [(bar.timestamp_ns, bar.close) for bar in result.bars] == [
+        (1, 100.0),
+        (2, 101.0),
+        (3, 102.0),
+    ]
 
 
 def test_active_future_validation_accepts_current_future() -> None:
@@ -145,7 +186,9 @@ def test_active_future_validation_preserves_czce_product_case() -> None:
 
 
 @pytest.mark.parametrize("ins_class,expired", [("", False), ("FUTURE", True), ("OPTION", False)])
-def test_active_future_validation_rejects_unavailable_contract(ins_class: str, expired: bool) -> None:
+def test_active_future_validation_rejects_unavailable_contract(
+    ins_class: str, expired: bool
+) -> None:
     client = TqClient()
     client._api = FakeQuoteApi(ins_class=ins_class, expired=expired)
 

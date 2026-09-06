@@ -66,8 +66,10 @@ const notificationPermission = ref<NotificationPermission | 'unsupported'>(
 )
 const seenAlertEvents = new Set<string>()
 const soundTimers = new Set<number>()
+const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 let alertAudio: HTMLAudioElement | null = null
 let alertRescanPending = false
+let signalRetryAfter = 0
 
 const commonPeriods = [
   { label: '日线', durationSeconds: 86400 },
@@ -428,6 +430,7 @@ async function loadContracts(): Promise<void> {
 
 async function selectContract(id: number): Promise<void> {
   selectedId.value = id
+  signalRetryAfter = 0
   signals.value = []
   periodNotes.value = {}
   dirtyNoteDurations.clear()
@@ -435,9 +438,10 @@ async function selectContract(id: number): Promise<void> {
   await refreshSignals()
 }
 
-async function refreshSignals(): Promise<void> {
+async function refreshSignals(force = false): Promise<void> {
   const contractId = selectedId.value
   if (!contractId || (refreshing.value && refreshingContractId === contractId)) return
+  if (!force && Date.now() < signalRetryAfter) return
 
   signalAbortController?.abort()
   const controller = createRequestController()
@@ -451,6 +455,9 @@ async function refreshSignals(): Promise<void> {
     })
     if (selectedId.value !== contractId || signalAbortController !== controller) return
     signals.value = data.signals
+    const warnings = data.warnings ?? []
+    errorText.value = warnings.join('；')
+    signalRetryAfter = warnings.length ? Date.now() + SIGNAL_WARNING_RETRY_MS : 0
     syncPeriodNotes(data.signals)
     if (!data.signals.some((signal) => signal.period.duration_seconds === selectedDuration.value)) {
       selectedDuration.value = data.signals[0]?.period.duration_seconds || null
@@ -458,6 +465,9 @@ async function refreshSignals(): Promise<void> {
   } catch (error: any) {
     if (controller.aborted) return
     errorText.value = error.response?.data?.detail || '读取均线数据失败'
+    if (error.response?.status === 422) {
+      signalRetryAfter = Date.now() + SIGNAL_WARNING_RETRY_MS
+    }
   } finally {
     if (signalAbortController === controller) {
       signalAbortController = null
@@ -501,7 +511,7 @@ async function updateContract(): Promise<void> {
     editingContract.value = null
     if (selectedId.value === contract.id) {
       signals.value = []
-      await refreshSignals()
+      await refreshSignals(true)
     }
     ElMessage.success(`已更换为 ${displayContractCode(data.code)}，原周期配置已保留`)
   } catch (error: any) {
@@ -537,7 +547,7 @@ async function savePeriod(): Promise<void> {
     await client.put(`/contracts/${selectedId.value}/periods`, periodForm.value)
     periodVisible.value = false
     await loadContracts()
-    await refreshSignals()
+    await refreshSignals(true)
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '保存失败')
   }
@@ -559,7 +569,7 @@ async function removePeriod(period: PeriodConfig): Promise<void> {
   await ElMessageBox.confirm(`确认删除 ${period.label} 配置？`, '删除周期', { type: 'warning' })
   await client.delete(`/contracts/${selectedId.value}/periods/${period.duration_seconds}`)
   await loadContracts()
-  await refreshSignals()
+  await refreshSignals(true)
 }
 
 async function saveCredentials(): Promise<void> {
@@ -568,7 +578,7 @@ async function saveCredentials(): Promise<void> {
     credentials.value = { username: '', password: '' }
     credentialsVisible.value = false
     ElMessage.success('天勤账号已保存')
-    await refreshSignals()
+    await refreshSignals(true)
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '保存失败')
   }
@@ -620,7 +630,7 @@ onBeforeUnmount(() => {
             <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
           </svg>
         </a>
-        <el-button :icon="Refresh" :loading="refreshing" plain @click="refreshSignals">更新数据</el-button>
+        <el-button :icon="Refresh" :loading="refreshing" plain @click="refreshSignals(true)">更新数据</el-button>
         <el-button :icon="Setting" plain @click="credentialsVisible = true">天勤账号</el-button>
         <el-button type="primary" :icon="Plus" @click="addVisible = true">添加合约</el-button>
       </div>

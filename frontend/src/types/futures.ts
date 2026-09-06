@@ -49,4 +49,5 @@ export interface ContractSignals {
   contract_id: number
   symbol: string
   signals: SignalSnapshot[]
+  warnings?: string[]
 }

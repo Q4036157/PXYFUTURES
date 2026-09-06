@@ -1,7 +1,10 @@
 """天勤 K 线读取适配器。"""
+
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import ceil
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 _CHINA_TZ = timezone(timedelta(hours=8))
 _MAX_TQ_KLINE_BARS = 10_000
 _MAX_CACHED_BASE_BARS = 50_000
+_CONNECTION_NOTICE_INTERVAL_SECONDS = 15 * 60
 
 
 class MarketDataUnavailable(RuntimeError):
@@ -43,6 +47,53 @@ class MarketBars:
     updated_at_ns: int | None
 
 
+class _TqConnectionNoticeLimiter:
+    """压缩 TqSdk 连接抖动提示，同时保留首次状态变化。"""
+
+    def __init__(
+        self,
+        interval_seconds: float = _CONNECTION_NOTICE_INTERVAL_SECONDS,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._interval_seconds = interval_seconds
+        self._clock = clock
+        self._last_emitted: dict[tuple[str, str], float] = {}
+        self._suppressed: dict[tuple[str, str], int] = {}
+
+    def handle(self, message: str, _level: str | int = "INFO") -> bool:
+        if "重新建立网络连接" in message:
+            return True
+        if "网络连接断开" in message:
+            event = "disconnected"
+            label = "断开"
+            log_level = logging.WARNING
+        elif "网络连接已恢复" in message:
+            event = "recovered"
+            label = "恢复"
+            log_level = logging.INFO
+        elif "网络连接已建立" in message:
+            event = "established"
+            label = "建立"
+            log_level = logging.INFO
+        else:
+            return False
+
+        match = re.search(r"(wss?://\S+?)(?:\s+的网络连接|\s+重新建立网络连接)", message)
+        url = match.group(1) if match else "unknown"
+        key = (url, event)
+        now = self._clock()
+        last_emitted = self._last_emitted.get(key)
+        if last_emitted is not None and now - last_emitted < self._interval_seconds:
+            self._suppressed[key] = self._suppressed.get(key, 0) + 1
+            return True
+
+        suppressed = self._suppressed.pop(key, 0)
+        suffix = f"，已抑制 {suppressed} 条重复提示" if suppressed else ""
+        logger.log(log_level, "天勤行情连接%s: %s%s", label, url, suffix)
+        self._last_emitted[key] = now
+        return True
+
+
 class TqClient:
     """以单个 TqApi 实例读取行情，所有调用由锁串行化。"""
 
@@ -53,6 +104,7 @@ class TqClient:
         self._remote_retry_after_monotonic = 0.0
         self._history_shortage_notices: set[tuple[str, int, int, int]] = set()
         self._active_contract_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+        self._connection_notice_limiter = _TqConnectionNoticeLimiter()
 
     def _get_api(self) -> object:
         if self._api is not None:
@@ -71,7 +123,15 @@ class TqClient:
             ) from exc
 
         try:
-            self._api = TqApi(auth=TqAuth(username, password))
+            notice_limiter = self._connection_notice_limiter
+
+            class FilteredTqApi(TqApi):
+                def _print(self, msg: str = "", level: str | int = "INFO") -> None:
+                    if notice_limiter.handle(msg, level):
+                        return
+                    super()._print(msg, level)
+
+            self._api = FilteredTqApi(auth=TqAuth(username, password))
             return self._api
         except Exception as exc:
             logger.exception("天勤连接失败")
@@ -177,7 +237,10 @@ class TqClient:
                         self._history_shortage_notices.add(notice_key)
                         logger.info(
                             "天勤可用历史少于状态回溯窗口: symbol=%s tq_symbol=%s requested=%d received=%d",
-                            symbol, tq_symbol, count, len(remote_bars),
+                            symbol,
+                            tq_symbol,
+                            count,
+                            len(remote_bars),
                         )
                 return MarketBars(self._bars_from_rows(cached), "live", synced_at_ns)
             except Exception as exc:
@@ -190,7 +253,9 @@ class TqClient:
                         exc,
                     )
                     return self._cached_result(symbol, duration_seconds, cached, sync_state)
-                logger.exception("读取天勤 K 线失败: %s (%s) %s", symbol, tq_symbol, duration_seconds)
+                logger.exception(
+                    "读取天勤 K 线失败: %s (%s) %s", symbol, tq_symbol, duration_seconds
+                )
                 raise MarketDataUnavailable(
                     f"读取天勤 K 线失败：{tq_symbol}，且本地没有可用缓存；请检查天勤连接后重试"
                 ) from exc
@@ -237,12 +302,16 @@ class TqClient:
             try:
                 quote = api.get_quote(tq_symbol)
             except Exception as exc:
-                logger.info("天勤合约验证失败: symbol=%s tq_symbol=%s", symbol, tq_symbol, exc_info=True)
+                logger.info(
+                    "天勤合约验证失败: symbol=%s tq_symbol=%s", symbol, tq_symbol, exc_info=True
+                )
                 raise MarketDataUnavailable(
                     f"暂时无法验证 {symbol} 是否可用，请检查天勤连接后重试"
                 ) from exc
 
-            if getattr(quote, "ins_class", "") != "FUTURE" or bool(getattr(quote, "expired", False)):
+            if getattr(quote, "ins_class", "") != "FUTURE" or bool(
+                getattr(quote, "expired", False)
+            ):
                 raise ContractUnavailable(f"{symbol} 当前不存在、已下市，或不是可添加的期货合约")
             return tq_symbol
 
@@ -275,7 +344,9 @@ class TqClient:
                 raise MarketDataUnavailable("暂时无法读取天勤可用合约，请稍后重试") from exc
 
             prefix = f"{normalized_exchange}."
-            active = tuple(sorted({symbol for symbol in symbols if symbol.upper().startswith(prefix)}))
+            active = tuple(
+                sorted({symbol for symbol in symbols if symbol.upper().startswith(prefix)})
+            )
             self._active_contract_cache[cache_key] = (now, active)
             return list(active)
 

@@ -1,9 +1,11 @@
 """实时均线状态接口。"""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -25,6 +27,22 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_ALERT_DURATIONS = frozenset({180, 300, 600, 900, 1800, 3600, 7200, 14400, 86400})
 _ALERT_STATE_LOOKBACK_BARS = 300
 _MAX_CACHED_BASE_BARS = 50_000
+_signal_requirement_notices: set[tuple[int, str, str]] = set()
+_signal_requirement_notice_lock = Lock()
+
+
+def _log_signal_requirement_once(contract_id: int, symbol: str, error: ValueError) -> None:
+    key = (contract_id, symbol, str(error))
+    with _signal_requirement_notice_lock:
+        if key in _signal_requirement_notices:
+            return
+        _signal_requirement_notices.add(key)
+    logger.warning(
+        "均线计算条件不满足: contract_id=%s symbol=%s error=%s",
+        contract_id,
+        symbol,
+        error,
+    )
 
 
 class AlertScanBody(BaseModel):
@@ -98,7 +116,9 @@ def _snapshot_from_market_bars(
         "confirmed_bar_time": _iso_time(bars[-2].timestamp_ns),
         "data_source": market_bars.source,
         "data_updated_at": (
-            datetime.fromtimestamp(market_bars.updated_at_ns / 1_000_000_000, tz=_CHINA_TZ).isoformat()
+            datetime.fromtimestamp(
+                market_bars.updated_at_ns / 1_000_000_000, tz=_CHINA_TZ
+            ).isoformat()
             if market_bars.updated_at_ns
             else None
         ),
@@ -182,22 +202,45 @@ async def get_signals(
     if contract is None:
         raise HTTPException(status_code=404, detail="合约不存在")
     if not contract.periods:
-        return {"contract_id": contract.id, "symbol": contract.symbol, "signals": []}
+        return {
+            "contract_id": contract.id,
+            "symbol": contract.symbol,
+            "signals": [],
+            "warnings": [],
+        }
     client: TqClient = request.app.state.tq_client
-    try:
-        signals = await asyncio.gather(
-            *(
-                asyncio.to_thread(_snapshot, client, repository, contract.symbol, period)
-                for period in contract.periods
+    period_results = await asyncio.gather(
+        *(
+            asyncio.to_thread(_snapshot, client, repository, contract.symbol, period)
+            for period in contract.periods
+        ),
+        return_exceptions=True,
+    )
+    signals: list[dict[str, object]] = []
+    warnings: list[str] = []
+    for result in period_results:
+        if isinstance(result, MarketDataUnavailable):
+            logger.error(
+                "均线数据获取失败: contract_id=%s symbol=%s error=%s",
+                contract_id,
+                contract.symbol,
+                result,
             )
-        )
-    except MarketDataUnavailable as exc:
-        logger.error("均线数据获取失败: contract_id=%s symbol=%s error=%s", contract_id, contract.symbol, exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except ValueError as exc:
-        logger.warning("均线计算条件不满足: contract_id=%s symbol=%s error=%s", contract_id, contract.symbol, exc)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"contract_id": contract.id, "symbol": contract.symbol, "signals": signals}
+            raise HTTPException(status_code=503, detail=str(result)) from result
+        if isinstance(result, ValueError):
+            _log_signal_requirement_once(contract_id, contract.symbol, result)
+            if str(result) not in warnings:
+                warnings.append(str(result))
+            continue
+        if isinstance(result, BaseException):
+            raise result
+        signals.append(result)
+    return {
+        "contract_id": contract.id,
+        "symbol": contract.symbol,
+        "signals": signals,
+        "warnings": warnings,
+    }
 
 
 @router.post("/alerts/scan")
