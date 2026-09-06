@@ -6,15 +6,43 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
 
-from app.market.ma_engine import MovingAverageConfig, calculate_signal
-from app.market.tq_client import MarketDataUnavailable, TqClient
+from app.market.boyi_kline import (
+    base_count_for,
+    base_duration_for,
+    rebuild_boyi_bars,
+    should_rebuild_for_boyi,
+)
+from app.market.ma_engine import Bar, MovingAverageConfig, calculate_signal
+from app.market.tq_client import MarketBars, MarketDataUnavailable, TqClient
 from app.services.auth import current_user_id
-from app.services.repository import ConfigRepository, PeriodConfig
+from app.services.repository import ConfigRepository, ContractConfig, PeriodConfig
 
 router = APIRouter(prefix="/api/contracts", tags=["均线信号"])
 _CHINA_TZ = timezone(timedelta(hours=8))
 logger = logging.getLogger(__name__)
+_SUPPORTED_ALERT_DURATIONS = frozenset({180, 300, 600, 900, 1800, 3600, 7200, 14400, 86400})
+_ALERT_STATE_LOOKBACK_BARS = 300
+_MAX_CACHED_BASE_BARS = 50_000
+
+
+class AlertScanBody(BaseModel):
+    durations: list[int] = Field(default_factory=list, max_length=9)
+
+    @field_validator("durations")
+    @classmethod
+    def validate_durations(cls, values: list[int]) -> list[int]:
+        unique_values = list(dict.fromkeys(values))
+        if any(value not in _SUPPORTED_ALERT_DURATIONS for value in unique_values):
+            raise ValueError("预警周期不受支持")
+        return unique_values
+
+
+def _iso_time(timestamp_ns: int | None) -> str | None:
+    if timestamp_ns is None:
+        return None
+    return datetime.fromtimestamp(timestamp_ns / 1_000_000_000, tz=_CHINA_TZ).isoformat()
 
 
 def _snapshot(
@@ -24,7 +52,21 @@ def _snapshot(
     period: PeriodConfig,
 ) -> dict[str, object]:
     config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
-    market_bars = client.fetch_bars(symbol, period.duration_seconds, config.required_bars + 300, repository)
+    market_bars = client.fetch_bars(
+        symbol,
+        period.duration_seconds,
+        config.required_bars + _ALERT_STATE_LOOKBACK_BARS,
+        repository,
+    )
+    return _snapshot_from_market_bars(symbol, period, market_bars)
+
+
+def _snapshot_from_market_bars(
+    symbol: str,
+    period: PeriodConfig,
+    market_bars: MarketBars,
+) -> dict[str, object]:
+    config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
     bars = market_bars.bars
     if len(bars) < config.required_bars:
         raise ValueError(
@@ -47,15 +89,13 @@ def _snapshot(
         "period": period.__dict__,
         "trend": {"m3": signal.trend_m3, "m4": signal.trend_m4},
         "cross_type": signal.cross_type,
+        "cross_time": _iso_time(signal.cross_time_ns),
         "label": signal.label,
-        "state_since": (
-            datetime.fromtimestamp(signal.state_since_ns / 1_000_000_000, tz=_CHINA_TZ).isoformat()
-            if signal.state_since_ns
-            else None
-        ),
+        "state_since": _iso_time(signal.state_since_ns),
         "ma_values": {name: round(value, 4) for name, value in signal.ma_values.items()},
         "bar_close": bars[-1].close,
-        "bar_time": datetime.fromtimestamp(bars[-1].timestamp_ns / 1_000_000_000, tz=_CHINA_TZ).isoformat(),
+        "bar_time": _iso_time(bars[-1].timestamp_ns),
+        "confirmed_bar_time": _iso_time(bars[-2].timestamp_ns),
         "data_source": market_bars.source,
         "data_updated_at": (
             datetime.fromtimestamp(market_bars.updated_at_ns / 1_000_000_000, tz=_CHINA_TZ).isoformat()
@@ -63,6 +103,74 @@ def _snapshot(
             else None
         ),
     }
+
+
+def _cached_source_request(period: PeriodConfig) -> tuple[int, int]:
+    config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
+    target_count = config.required_bars + _ALERT_STATE_LOOKBACK_BARS
+    if not should_rebuild_for_boyi(period.duration_seconds):
+        return period.duration_seconds, target_count
+    base_duration_seconds = base_duration_for(period.duration_seconds)
+    return (
+        base_duration_seconds,
+        min(
+            _MAX_CACHED_BASE_BARS,
+            base_count_for(period.duration_seconds, target_count, base_duration_seconds),
+        ),
+    )
+
+
+def _scan_cached_alert_jobs(
+    repository: ConfigRepository,
+    jobs: list[tuple[ContractConfig, PeriodConfig]],
+) -> tuple[list[dict[str, object]], int]:
+    """按合约和基础周期合并数据库读取，再恢复各预警周期状态。"""
+    source_counts: dict[tuple[str, int], int] = {}
+    for contract, period in jobs:
+        base_duration_seconds, base_count = _cached_source_request(period)
+        key = (contract.symbol, base_duration_seconds)
+        source_counts[key] = max(source_counts.get(key, 0), base_count)
+
+    sources: dict[tuple[str, int], MarketBars] = {}
+    for (symbol, duration_seconds), count in source_counts.items():
+        rows = repository.load_kline_bars(symbol, duration_seconds, count)
+        sync_state = repository.get_kline_sync_state(symbol, duration_seconds)
+        sources[(symbol, duration_seconds)] = MarketBars(
+            bars=[Bar(timestamp_ns=timestamp_ns, close=close) for timestamp_ns, close in rows],
+            source="cache",
+            updated_at_ns=sync_state.last_synced_at_ns if sync_state else None,
+        )
+
+    snapshots: list[dict[str, object]] = []
+    failed = 0
+    for contract, period in jobs:
+        base_duration_seconds, _base_count = _cached_source_request(period)
+        source = sources[(contract.symbol, base_duration_seconds)]
+        config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
+        target_count = config.required_bars + _ALERT_STATE_LOOKBACK_BARS
+        bars = source.bars
+        if should_rebuild_for_boyi(period.duration_seconds):
+            bars = rebuild_boyi_bars(bars, period.duration_seconds, base_duration_seconds)
+        market_bars = MarketBars(
+            bars=bars[-target_count:],
+            source="cache",
+            updated_at_ns=source.updated_at_ns,
+        )
+        try:
+            snapshot = _snapshot_from_market_bars(contract.symbol, period, market_bars)
+        except (MarketDataUnavailable, ValueError) as exc:
+            failed += 1
+            logger.debug("预警缓存计算跳过: symbol=%s error=%s", contract.symbol, exc)
+            continue
+        snapshots.append(
+            {
+                "contract_id": contract.id,
+                "symbol": contract.symbol,
+                "name": contract.name,
+                **snapshot,
+            }
+        )
+    return snapshots, failed
 
 
 @router.get("/{contract_id}/signals")
@@ -90,3 +198,29 @@ async def get_signals(
         logger.warning("均线计算条件不满足: contract_id=%s symbol=%s error=%s", contract_id, contract.symbol, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"contract_id": contract.id, "symbol": contract.symbol, "signals": signals}
+
+
+@router.post("/alerts/scan")
+async def scan_alerts(
+    body: AlertScanBody,
+    request: Request,
+    user_id: str = Depends(current_user_id),
+) -> dict[str, object]:
+    """批量计算当前用户自选合约中已配置的预警周期。"""
+    if not body.durations:
+        return {"signals": [], "requested": 0, "failed": 0}
+
+    repository: ConfigRepository = request.app.state.config_repository
+    selected_durations = set(body.durations)
+    jobs = [
+        (contract, period)
+        for contract in repository.list_contracts(user_id)
+        for period in contract.periods
+        if period.duration_seconds in selected_durations
+    ]
+    snapshots, failed = await asyncio.to_thread(
+        _scan_cached_alert_jobs,
+        repository,
+        jobs,
+    )
+    return {"signals": snapshots, "requested": len(jobs), "failed": failed}

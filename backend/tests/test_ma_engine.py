@@ -47,6 +47,7 @@ def test_golden_cross_advances_from_rebound_to_rise_without_reverse_cross() -> N
     state = calculate_signal(bars, MovingAverageConfig(m4=5, m3=4, m2=3, m1=1))
 
     assert state.cross_type == CrossType.GOLDEN
+    assert state.cross_time_ns == 5
     assert state.label == "上涨"
     assert state.state_since_ns == 7
     assert state.trend_m3 == Trend.BULLISH
@@ -59,6 +60,7 @@ def test_death_cross_advances_from_pullback_to_fall() -> None:
     state = calculate_signal(bars, MovingAverageConfig(m4=5, m3=4, m2=3, m1=1))
 
     assert state.cross_type == CrossType.DEATH
+    assert state.cross_time_ns == 5
     assert state.label == "下跌"
     assert state.state_since_ns == 7
 

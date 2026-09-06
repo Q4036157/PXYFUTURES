@@ -52,6 +52,7 @@ class SignalState:
     trend_m3: Trend
     trend_m4: Trend
     cross_type: CrossType | None
+    cross_time_ns: int | None
     label: str
     state_since_ns: int | None
     ma_values: dict[str, float]
@@ -138,6 +139,7 @@ def calculate_signal(
     trend_m4 = Trend.BULLISH if series["M4"][latest] > series["M4"][previous] else Trend.BEARISH
 
     latest_cross: CrossType | None = None
+    cross_time_ns: int | None = None
     latest_label = "等待交叉"
     state_since_ns: int | None = None
     state_bar_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
@@ -150,8 +152,10 @@ def calculate_signal(
             continue
         if m1_prev <= m2_prev and m1_now > m2_now:
             latest_cross = CrossType.GOLDEN
+            cross_time_ns = bars[index].timestamp_ns
         elif m1_prev >= m2_prev and m1_now < m2_now:
             latest_cross = CrossType.DEATH
+            cross_time_ns = bars[index].timestamp_ns
         if latest_cross is None:
             continue
 
@@ -169,6 +173,7 @@ def calculate_signal(
         trend_m3=trend_m3,
         trend_m4=trend_m4,
         cross_type=latest_cross,
+        cross_time_ns=cross_time_ns,
         label=latest_label,
         state_since_ns=state_since_ns,
         ma_values=ma_values,

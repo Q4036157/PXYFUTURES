@@ -4,7 +4,19 @@ import { Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
-import type { ContractConfig, ContractSignals, PeriodConfig, SignalSnapshot } from '@/types/futures'
+import alertSoundUrl from '@/assets/ok3.wav?url'
+import type {
+  AlertScanResult,
+  AlertSignalSnapshot,
+  ContractConfig,
+  ContractSignals,
+  PeriodConfig,
+  SignalSnapshot,
+} from '@/types/futures'
+
+type AlertCondition =
+  | '多多金叉' | '多空金叉' | '空多金叉' | '空空金叉'
+  | '多多死叉' | '多空死叉' | '空多死叉' | '空空死叉'
 
 const contracts = ref<ContractConfig[]>([])
 const selectedId = ref<number | null>(null)
@@ -27,6 +39,8 @@ const contractEditForm = ref({ exchange: '', code: '', name: '' })
 const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 })
 const credentials = ref({ username: '', password: '' })
 let timer: number | undefined
+let alertTimer: number | undefined
+let alertPopupTimer: number | undefined
 interface RequestController {
   readonly aborted: boolean
   signal?: AbortSignal
@@ -39,6 +53,21 @@ const dirtyNoteDurations = new Set<number>()
 const savingNoteKeys = new Set<string>()
 const pendingNoteValues = new Map<string, string>()
 const noteSaveTimers = new Map<string, number>()
+const selectedAlertDurations = ref<number[]>([])
+const selectedAlertConditions = ref<AlertCondition[]>([])
+const alertSignals = ref<AlertSignalSnapshot[]>([])
+const alertScanning = ref(false)
+const alertScanError = ref('')
+const alertFailedCount = ref(0)
+const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
+const alertPopupVisible = ref(false)
+const notificationPermission = ref<NotificationPermission | 'unsupported'>(
+  typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+)
+const seenAlertEvents = new Set<string>()
+const soundTimers = new Set<number>()
+let alertAudio: HTMLAudioElement | null = null
+let alertRescanPending = false
 
 const commonPeriods = [
   { label: '日线', durationSeconds: 86400 },
@@ -52,6 +81,11 @@ const commonPeriods = [
   { label: '3分钟', durationSeconds: 180 },
 ]
 
+const alertConditionOptions: AlertCondition[] = [
+  '多多金叉', '多空金叉', '空多金叉', '空空金叉',
+  '多多死叉', '多空死叉', '空多死叉', '空空死叉',
+]
+
 const selectedContract = computed(() => contracts.value.find((item) => item.id === selectedId.value) || null)
 const selectedSignal = computed(() => (
   signals.value.find((signal) => signal.period.duration_seconds === selectedDuration.value)
@@ -60,6 +94,167 @@ const selectedSignal = computed(() => (
 ))
 const recognition = computed(() => recognizeContract(form.value.code))
 const contractEditRecognition = computed(() => recognizeContract(contractEditForm.value.code))
+const matchingAlertSignals = computed(() => {
+  const durations = new Set(selectedAlertDurations.value)
+  const conditions = new Set(selectedAlertConditions.value)
+  return alertSignals.value
+    .filter((signal) => {
+      const condition = alertCondition(signal)
+      return durations.has(signal.period.duration_seconds) && condition !== null && conditions.has(condition)
+    })
+    .sort((left, right) => {
+      const durationOrder = commonPeriods.findIndex(
+        (period) => period.durationSeconds === left.period.duration_seconds,
+      ) - commonPeriods.findIndex(
+        (period) => period.durationSeconds === right.period.duration_seconds,
+      )
+      return durationOrder || left.symbol.localeCompare(right.symbol)
+    })
+})
+
+const alertStatusText = computed(() => {
+  if (!selectedAlertDurations.value.length || !selectedAlertConditions.value.length) {
+    return '请选择周期和条件开始监测'
+  }
+  if (alertScanning.value) return '正在扫描自选合约'
+  if (alertScanError.value) return alertScanError.value
+  if (alertFailedCount.value) {
+    return `当前匹配 ${matchingAlertSignals.value.length} 条，${alertFailedCount.value} 条等待行情缓存`
+  }
+  return `当前匹配 ${matchingAlertSignals.value.length} 条`
+})
+
+function alertCondition(signal: AlertSignalSnapshot): AlertCondition | null {
+  if (!signal.cross_type) return null
+  return `${signal.trend.m4}${signal.trend.m3}${signal.cross_type}` as AlertCondition
+}
+
+function alertText(signal: AlertSignalSnapshot): string {
+  return `${signal.symbol} · ${signal.period.label} · ${alertCondition(signal)} · ${signal.label}`
+}
+
+function alertEventKey(signal: AlertSignalSnapshot): string {
+  return `${signal.contract_id}:${signal.period.duration_seconds}:${signal.cross_type}:${signal.cross_time}`
+}
+
+function getAlertAudio(): HTMLAudioElement {
+  if (!alertAudio) {
+    alertAudio = new Audio(alertSoundUrl)
+    alertAudio.preload = 'auto'
+  }
+  return alertAudio
+}
+
+function enableBrowserAlerts(): void {
+  const audio = getAlertAudio()
+  audio.muted = true
+  void audio.play().then(() => {
+    audio.pause()
+    audio.currentTime = 0
+    audio.muted = false
+  }).catch(() => undefined)
+
+  if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    void Notification.requestPermission().then((permission) => {
+      notificationPermission.value = permission
+    })
+  }
+}
+
+function toggleAlertDuration(durationSeconds: number): void {
+  enableBrowserAlerts()
+  selectedAlertDurations.value = selectedAlertDurations.value.includes(durationSeconds)
+    ? selectedAlertDurations.value.filter((value) => value !== durationSeconds)
+    : [...selectedAlertDurations.value, durationSeconds]
+  void refreshAlertSignals()
+}
+
+function toggleAlertCondition(condition: AlertCondition): void {
+  enableBrowserAlerts()
+  selectedAlertConditions.value = selectedAlertConditions.value.includes(condition)
+    ? selectedAlertConditions.value.filter((value) => value !== condition)
+    : [...selectedAlertConditions.value, condition]
+  void refreshAlertSignals()
+}
+
+function playAlertSound(): void {
+  const audio = getAlertAudio()
+  for (let index = 0; index < 5; index += 1) {
+    const soundTimer = window.setTimeout(() => {
+      soundTimers.delete(soundTimer)
+      audio.pause()
+      audio.currentTime = 0
+      audio.muted = false
+      void audio.play().catch(() => {
+        alertScanError.value = '浏览器已阻止声音，请点击任一预警按钮后继续监测'
+      })
+    }, index * 1_000)
+    soundTimers.add(soundTimer)
+  }
+}
+
+function showAlertNotification(items: AlertSignalSnapshot[]): void {
+  playAlertSound()
+  if (!document.hidden) {
+    alertPopupSignals.value = items
+    alertPopupVisible.value = true
+    if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
+    alertPopupTimer = window.setTimeout(() => {
+      alertPopupVisible.value = false
+    }, 5_000)
+    return
+  }
+
+  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    const preview = items.slice(0, 5).map(alertText).join('\n')
+    const more = items.length > 5 ? `\n另有 ${items.length - 5} 条信号` : ''
+    new Notification(`智能期货预警 · ${items.length}条新信号`, {
+      body: `${preview}${more}`,
+      tag: 'pxy-futures-alert',
+    })
+  }
+}
+
+async function refreshAlertSignals(): Promise<void> {
+  if (alertScanning.value) {
+    alertRescanPending = true
+    return
+  }
+  if (!selectedAlertDurations.value.length || !selectedAlertConditions.value.length) {
+    alertSignals.value = []
+    alertFailedCount.value = 0
+    alertScanError.value = ''
+    return
+  }
+
+  alertScanning.value = true
+  alertScanError.value = ''
+  try {
+    const { data } = await client.post<AlertScanResult>('/contracts/alerts/scan', {
+      durations: selectedAlertDurations.value,
+    })
+    alertSignals.value = data.signals
+    alertFailedCount.value = data.failed
+
+    const selectedConditions = new Set(selectedAlertConditions.value)
+    const newSignals = data.signals.filter((signal) => {
+      const condition = alertCondition(signal)
+      if (!condition || !selectedConditions.has(condition)) return false
+      if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
+      return !seenAlertEvents.has(alertEventKey(signal))
+    })
+    for (const signal of newSignals) seenAlertEvents.add(alertEventKey(signal))
+    if (newSignals.length) showAlertNotification(newSignals)
+  } catch (error: any) {
+    alertScanError.value = error.response?.data?.detail || '预警扫描暂时不可用'
+  } finally {
+    alertScanning.value = false
+    if (alertRescanPending) {
+      alertRescanPending = false
+      void refreshAlertSignals()
+    }
+  }
+}
 
 function createRequestController(): RequestController {
   if (typeof AbortController !== 'undefined') {
@@ -383,6 +578,7 @@ onMounted(async () => {
   try {
     await loadContracts()
     timer = window.setInterval(() => void refreshSignals(), 3_000)
+    alertTimer = window.setInterval(() => void refreshAlertSignals(), 10_000)
   } catch (error: any) {
     if (error.response?.status === 401) {
       const loginUrl = `/login?redirect=${encodeURIComponent('/apps/launch/futures')}`
@@ -396,6 +592,11 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
+  if (alertTimer) window.clearInterval(alertTimer)
+  if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
+  for (const soundTimer of soundTimers) window.clearTimeout(soundTimer)
+  soundTimers.clear()
+  alertAudio?.pause()
   signalAbortController?.abort()
   for (const signal of signals.value) flushPeriodNote(signal)
   for (const noteTimer of noteSaveTimers.values()) window.clearTimeout(noteTimer)
@@ -445,8 +646,65 @@ onBeforeUnmount(() => {
         <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td class="signal-state-cell"><div class="state signal-state-layout" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''"><span>{{ signal.label }}</span><span class="cross-type">{{ signal.cross_type || '' }}</span></div></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
         <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
         <footer v-if="selectedContract" class="ma-footer"><span>均线数值 · {{ displayContractCode(selectedContract.code) }} · {{ selectedSignal?.period.label || '--' }}：</span><strong>M4：{{ maText('M4') }}{{ longTrendText('m4') }}</strong><strong>M3：{{ maText('M3') }}{{ longTrendText('m3') }}</strong><strong>M2：{{ maText('M2') }}</strong><strong>M1：{{ maText('M1') }}</strong><small v-if="selectedSignal">{{ selectedSignal.period.label }} · {{ selectedSignal.bar_time.replace('T', ' ').slice(0, 19) }} · {{ dataStatusText(selectedSignal) }}</small><small v-else>等待可用的实时 K 线数据</small></footer>
+        <section class="alert-center" aria-label="全品种预警">
+          <header class="alert-center-header">
+            <div><span class="alert-kicker">MARKET SENTINEL</span><h2>全品种预警</h2></div>
+            <span class="alert-status" :class="{ scanning: alertScanning }">{{ alertStatusText }}</span>
+          </header>
+          <div class="alert-control-row">
+            <strong>预警周期</strong>
+            <div class="alert-options">
+              <button
+                v-for="period in commonPeriods"
+                :key="period.durationSeconds"
+                type="button"
+                :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }"
+                :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)"
+                @click="toggleAlertDuration(period.durationSeconds)"
+              >{{ period.label }}</button>
+            </div>
+          </div>
+          <div class="alert-control-row conditions">
+            <strong>预警条件</strong>
+            <div class="alert-options">
+              <button
+                v-for="condition in alertConditionOptions"
+                :key="condition"
+                type="button"
+                :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }"
+                :aria-pressed="selectedAlertConditions.includes(condition)"
+                @click="toggleAlertCondition(condition)"
+              >{{ condition }}</button>
+            </div>
+          </div>
+          <div class="alert-results">
+            <div v-if="matchingAlertSignals.length" class="alert-result-grid">
+              <div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item">
+                <span class="signal-pulse"></span><span>{{ alertText(signal) }}</span>
+              </div>
+            </div>
+            <div v-else class="alert-empty">{{ alertStatusText }}</div>
+          </div>
+          <footer class="alert-center-footer">
+            <span>仅监测当前账号自选合约已配置的周期</span>
+            <span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span>
+            <span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span>
+          </footer>
+        </section>
       </div>
     </section>
+
+    <Transition name="alert-popup">
+      <aside v-if="alertPopupVisible" class="market-alert-popup" role="alert" aria-live="assertive">
+        <div class="popup-scanline"></div>
+        <header><span>MARKET SIGNAL</span><strong>智能期货预警</strong><small>{{ alertPopupSignals.length }} 条新信号</small></header>
+        <div class="popup-signals">
+          <p v-for="signal in alertPopupSignals.slice(0, 5)" :key="alertEventKey(signal)">{{ alertText(signal) }}</p>
+          <p v-if="alertPopupSignals.length > 5">另有 {{ alertPopupSignals.length - 5 }} 条信号，请查看预警列表</p>
+        </div>
+        <div class="popup-countdown"></div>
+      </aside>
+    </Transition>
 
     <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close>
       <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item></el-form>
