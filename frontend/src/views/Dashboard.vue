@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
+import { Back, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
@@ -70,6 +70,9 @@ const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 let alertAudio: HTMLAudioElement | null = null
 let alertRescanPending = false
 let signalRetryAfter = 0
+const platformReturnVisible = window.location.pathname === '/futures-app'
+  || window.location.pathname.startsWith('/futures-app/')
+  || window.self !== window.top
 
 const commonPeriods = [
   { label: '日线', durationSeconds: 86400 },
@@ -618,6 +621,17 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <div><h1>智能期货</h1><span>多周期均线分布</span></div>
       <div class="topbar-actions">
+        <a
+          v-if="platformReturnVisible"
+          class="platform-return"
+          href="/dashboard"
+          target="_top"
+          title="返回貔貅元量化"
+          aria-label="返回貔貅元量化"
+        >
+          <el-icon><Back /></el-icon>
+          <span>返回貔貅元</span>
+        </a>
         <a
           class="repo-link"
           href="https://github.com/Q4036157/PXYAPPS"
