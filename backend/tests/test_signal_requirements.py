@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api import signals
-from app.api.signals import _snapshot
+from app.api.signals import _snapshot, _snapshot_from_market_bars
 from app.market.ma_engine import Bar
 from app.market.tq_client import MarketBars
 from app.services.repository import ContractConfig, PeriodConfig
@@ -43,6 +43,43 @@ def test_snapshot_exposes_cross_and_confirmed_bar_times() -> None:
 
     assert snapshot["cross_time"] == "1970-01-01T08:00:05+08:00"
     assert snapshot["confirmed_bar_time"] == "1970-01-01T08:00:05+08:00"
+
+
+def test_alert_snapshot_ignores_entire_in_progress_bar() -> None:
+    period = PeriodConfig(id=1, label="3分钟", duration_seconds=180, m4=5, m3=4, m2=3, m1=1)
+    confirmed_closes = [10, 9, 8, 7, 6, 7, 8]
+
+    low_live = MarketBars(
+        [Bar(index * 1_000_000_000, float(close)) for index, close in enumerate([*confirmed_closes, 1])],
+        "cache",
+        1,
+    )
+    high_live = MarketBars(
+        [Bar(index * 1_000_000_000, float(close)) for index, close in enumerate([*confirmed_closes, 100])],
+        "cache",
+        1,
+    )
+
+    low_snapshot = _snapshot_from_market_bars("DCE.B2701", period, low_live, confirmed_only=True)
+    high_snapshot = _snapshot_from_market_bars("DCE.B2701", period, high_live, confirmed_only=True)
+
+    stable_fields = (
+        "trend",
+        "cross_type",
+        "cross_time",
+        "label",
+        "state_since",
+        "ma_values",
+        "bar_close",
+        "bar_time",
+        "confirmed_bar_time",
+    )
+    assert {field: low_snapshot[field] for field in stable_fields} == {
+        field: high_snapshot[field] for field in stable_fields
+    }
+    assert low_snapshot["bar_close"] == 8
+    assert low_snapshot["bar_time"] == "1970-01-01T08:00:06+08:00"
+    assert low_snapshot["confirmed_bar_time"] == low_snapshot["bar_time"]
 
 
 class MixedHistoryClient:

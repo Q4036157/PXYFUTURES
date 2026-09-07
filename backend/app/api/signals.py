@@ -83,17 +83,24 @@ def _snapshot_from_market_bars(
     symbol: str,
     period: PeriodConfig,
     market_bars: MarketBars,
+    *,
+    confirmed_only: bool = False,
 ) -> dict[str, object]:
     config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
     bars = market_bars.bars
-    if len(bars) < config.required_bars:
+    calculation_bars = bars[:-1] if confirmed_only else bars
+    if len(calculation_bars) < config.required_bars:
         raise ValueError(
-            f"{symbol} 的 {period.label} 当前只有 {len(bars)} 根有效 K 线，"
+            f"{symbol} 的 {period.label} 当前只有 {len(calculation_bars)} 根有效 K 线，"
             f"当前均线最大周期为 {max(period.m1 * 4, period.m2, period.m3, period.m4)}，"
             f"至少需要 {config.required_bars} 根；请降低均线周期或更换历史更长的合约"
         )
-    # 天勤序列最后一根可能仍在形成；状态只用此前已确认收盘的 K 线。
-    signal = calculate_signal(bars, config, confirmed_bar_count=len(bars) - 1)
+    # 普通均线表保留实时均线；预警必须整套使用此前已确认收盘的 K 线。
+    signal = calculate_signal(
+        calculation_bars,
+        config,
+        confirmed_bar_count=None if confirmed_only else len(bars) - 1,
+    )
     logger.debug(
         "均线计算成功: symbol=%s period=%s bars=%d ma=%s cross=%s label=%s",
         symbol,
@@ -111,8 +118,8 @@ def _snapshot_from_market_bars(
         "label": signal.label,
         "state_since": _iso_time(signal.state_since_ns),
         "ma_values": {name: round(value, 4) for name, value in signal.ma_values.items()},
-        "bar_close": bars[-1].close,
-        "bar_time": _iso_time(bars[-1].timestamp_ns),
+        "bar_close": calculation_bars[-1].close,
+        "bar_time": _iso_time(calculation_bars[-1].timestamp_ns),
         "confirmed_bar_time": _iso_time(bars[-2].timestamp_ns),
         "data_source": market_bars.source,
         "data_updated_at": (
@@ -177,7 +184,12 @@ def _scan_cached_alert_jobs(
             updated_at_ns=source.updated_at_ns,
         )
         try:
-            snapshot = _snapshot_from_market_bars(contract.symbol, period, market_bars)
+            snapshot = _snapshot_from_market_bars(
+                contract.symbol,
+                period,
+                market_bars,
+                confirmed_only=True,
+            )
         except (MarketDataUnavailable, ValueError) as exc:
             failed += 1
             logger.debug("预警缓存计算跳过: symbol=%s error=%s", contract.symbol, exc)
