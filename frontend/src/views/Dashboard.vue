@@ -619,7 +619,10 @@ onBeforeUnmount(() => {
 <template>
   <main class="workspace">
     <header class="topbar">
-      <div><h1>智能期货</h1><span>多周期均线分布</span></div>
+      <div class="app-brand">
+        <span class="app-brand-mark">P</span>
+        <div class="app-brand-copy"><h1>智能期货</h1><span>数据 · 均线 · 预警</span></div>
+      </div>
       <div class="topbar-actions">
         <a
           v-if="platformReturnVisible"
