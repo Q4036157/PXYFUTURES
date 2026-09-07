@@ -626,11 +626,11 @@ onBeforeUnmount(() => {
           class="platform-return"
           href="/dashboard"
           target="_top"
-          title="返回貔貅元量化"
-          aria-label="返回貔貅元量化"
+          title="返回平台主页"
+          aria-label="返回平台主页"
         >
           <el-icon><Back /></el-icon>
-          <span>返回貔貅元</span>
+          <span>返回平台主页</span>
         </a>
         <a
           class="repo-link"
