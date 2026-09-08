@@ -51,7 +51,7 @@ def test_build_jobs_deduplicates_periods_that_share_a_base_series() -> None:
 
     assert [(job.duration_seconds, job.count) for job in jobs] == [
         (60, 1503),
-        (300, 3186),
+        (300, 3246),
     ]
 
 

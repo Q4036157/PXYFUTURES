@@ -259,25 +259,41 @@ class ConfigRepository:
         synced_at_ns: int | None = None,
     ) -> None:
         """写入天勤返回的 K 线；同一根进行中 K 线以最新收盘价覆盖。"""
-        if not bars:
+        self.save_kline_bar_batches(
+            [(symbol, duration_seconds, bars, requested_count)],
+            synced_at_ns,
+        )
+
+    def save_kline_bar_batches(
+        self,
+        batches: Sequence[tuple[str, int, Sequence[tuple[int, float]], int]],
+        synced_at_ns: int | None = None,
+    ) -> None:
+        """用一个事务写入多条基础序列，缩短批量收K后的落库延迟。"""
+        nonempty_batches = [batch for batch in batches if batch[2]]
+        if not nonempty_batches:
             return
         synced_at_ns = synced_at_ns or time_ns()
         with self._connect() as conn:
-            conn.executemany(
-                """INSERT INTO kline_bars(symbol, duration_seconds, timestamp_ns, close, updated_at_ns)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(symbol, duration_seconds, timestamp_ns) DO UPDATE SET
-                     close = excluded.close, updated_at_ns = excluded.updated_at_ns""",
-                [(symbol, duration_seconds, timestamp_ns, close, synced_at_ns) for timestamp_ns, close in bars],
-            )
-            conn.execute(
-                """INSERT INTO kline_sync_states(symbol, duration_seconds, max_requested_bars, last_synced_at_ns)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(symbol, duration_seconds) DO UPDATE SET
-                     max_requested_bars = MAX(max_requested_bars, excluded.max_requested_bars),
-                     last_synced_at_ns = excluded.last_synced_at_ns""",
-                (symbol, duration_seconds, requested_count, synced_at_ns),
-            )
+            for symbol, duration_seconds, bars, requested_count in nonempty_batches:
+                conn.executemany(
+                    """INSERT INTO kline_bars(symbol, duration_seconds, timestamp_ns, close, updated_at_ns)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(symbol, duration_seconds, timestamp_ns) DO UPDATE SET
+                         close = excluded.close, updated_at_ns = excluded.updated_at_ns""",
+                    [
+                        (symbol, duration_seconds, timestamp_ns, close, synced_at_ns)
+                        for timestamp_ns, close in bars
+                    ],
+                )
+                conn.execute(
+                    """INSERT INTO kline_sync_states(symbol, duration_seconds, max_requested_bars, last_synced_at_ns)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(symbol, duration_seconds) DO UPDATE SET
+                         max_requested_bars = MAX(max_requested_bars, excluded.max_requested_bars),
+                         last_synced_at_ns = excluded.last_synced_at_ns""",
+                    (symbol, duration_seconds, requested_count, synced_at_ns),
+                )
 
     def _contract_from_row(self, conn: sqlite3.Connection, row: sqlite3.Row) -> ContractConfig:
         periods = conn.execute(

@@ -25,6 +25,7 @@ class Frame:
 class Repository:
     def __init__(self) -> None:
         self.saved: list[tuple[str, int, list[tuple[int, float]], int, int]] = []
+        self.batch_writes = 0
 
     def save_kline_bars(
         self,
@@ -37,6 +38,21 @@ class Repository:
         self.saved.append(
             (symbol, duration_seconds, bars, requested_count, synced_at_ns)
         )
+
+    def save_kline_bar_batches(
+        self,
+        batches: list[tuple[str, int, list[tuple[int, float]], int]],
+        synced_at_ns: int,
+    ) -> None:
+        self.batch_writes += 1
+        for symbol, duration_seconds, bars, requested_count in batches:
+            self.save_kline_bars(
+                symbol,
+                duration_seconds,
+                bars,
+                requested_count,
+                synced_at_ns,
+            )
 
 
 def test_wait_update_emits_only_after_new_bar_timestamp() -> None:
@@ -63,6 +79,7 @@ def test_wait_update_emits_only_after_new_bar_timestamp() -> None:
     )
 
     assert rollover.changed_sources == {("CZCE.UR701", 60): 300}
+    assert repository.batch_writes == 1
     assert repository.saved[0][2] == [(100, 10.0), (200, 11.0)]
     assert repository.saved[1][2] == [(100, 10.0), (200, 11.0), (300, 12.0)]
 

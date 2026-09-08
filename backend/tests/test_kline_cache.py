@@ -35,6 +35,30 @@ def test_kline_cache_persists_history_and_updates_the_current_bar(
     assert state.last_synced_at_ns == 2000
 
 
+def test_kline_cache_writes_multiple_series_in_one_batch(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    repository = ConfigRepository()
+
+    repository.save_kline_bar_batches(
+        [
+            ("CZCE.UR701", 60, [(100, 10.0), (200, 11.0)], 1503),
+            ("DCE.PP2701", 300, [(100, 20.0), (200, 21.0)], 3246),
+        ],
+        synced_at_ns=3000,
+    )
+
+    assert repository.load_kline_bars("CZCE.UR701", 60, 10) == [
+        (100, 10.0),
+        (200, 11.0),
+    ]
+    assert repository.load_kline_bars("DCE.PP2701", 300, 10) == [
+        (100, 20.0),
+        (200, 21.0),
+    ]
+    assert repository.get_kline_sync_state("CZCE.UR701", 60).last_synced_at_ns == 3000  # type: ignore[union-attr]
+    assert repository.get_kline_sync_state("DCE.PP2701", 300).max_requested_bars == 3246  # type: ignore[union-attr]
+
+
 def test_updating_contract_symbol_preserves_all_periods(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     repository = ConfigRepository()

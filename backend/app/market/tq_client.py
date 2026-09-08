@@ -234,6 +234,7 @@ class TqClient:
         synced_at_ns: int,
     ) -> dict[tuple[str, int], int]:
         changed: dict[tuple[str, int], int] = {}
+        batches: list[tuple[str, int, list[tuple[int, float]], int]] = []
         for key in active_keys:
             series = self._live_kline_series[key]
             latest_rows = self._remote_bars(series.frame, tail=10)
@@ -252,15 +253,11 @@ class TqClient:
                 continue
             if latest_timestamp_ns <= series.latest_timestamp_ns:
                 continue
-            repository.save_kline_bars(
-                key[0],
-                key[1],
-                latest_rows,
-                series.cache_count,
-                synced_at_ns,
-            )
+            batches.append((key[0], key[1], latest_rows, series.cache_count))
             series.latest_timestamp_ns = latest_timestamp_ns
             changed[key] = latest_timestamp_ns
+        if batches:
+            repository.save_kline_bar_batches(batches, synced_at_ns)
         return changed
 
     @staticmethod

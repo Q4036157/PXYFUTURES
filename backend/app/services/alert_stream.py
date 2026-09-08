@@ -38,6 +38,7 @@ class AlertStreamService:
         self._pending_sources: dict[tuple[str, int], int] = {}
         self._pending_received_at_ns = 0
         self._flush_task: asyncio.Task[None] | None = None
+        self._closed = False
 
     def register(self, user_id: str) -> AlertSubscriber:
         subscriber = AlertSubscriber(id=uuid4().hex, user_id=user_id)
@@ -74,7 +75,7 @@ class AlertStreamService:
 
     async def publish_rollovers(self, event: MarketSyncEvent) -> None:
         """聚合同一收盘时刻分批到达的多个品种，避免重复扫描。"""
-        if not self._subscribers:
+        if self._closed or not self._subscribers:
             return
         self._pending_sources.update(event.changed_sources)
         self._pending_received_at_ns = max(
@@ -82,9 +83,22 @@ class AlertStreamService:
             event.received_at_ns,
         )
         if self._flush_task is None or self._flush_task.done():
-            self._flush_task = asyncio.create_task(self._flush_after_delay())
+            self._start_flush()
+
+    def _start_flush(self) -> None:
+        self._flush_task = asyncio.create_task(self._flush_after_delay())
+        self._flush_task.add_done_callback(self._flush_finished)
+
+    def _flush_finished(self, task: asyncio.Task[None]) -> None:
+        if self._flush_task is task:
+            self._flush_task = None
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("收盘预警推送任务异常: %s", task.exception())
+        if self._pending_sources and not self._closed:
+            self._start_flush()
 
     async def close(self) -> None:
+        self._closed = True
         if self._flush_task is not None and not self._flush_task.done():
             self._flush_task.cancel()
             try:

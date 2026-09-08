@@ -259,7 +259,6 @@ async def stream_alerts(websocket: WebSocket) -> None:
             message = await websocket.receive_json()
             message_type = str(message.get("type", ""))
             if message_type == "ping":
-                service.offer_control(subscriber.id, "pong")
                 continue
             if message_type != "subscribe":
                 service.offer_control(subscriber.id, "invalid_message")
