@@ -61,6 +61,8 @@ button { font: inherit; }
 .alert-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .alert-result-item { display: flex; align-items: center; gap: 9px; min-width: 0; height: 40px; padding: 0 16px; color: var(--pxy-mint); border-right: 1px solid rgb(185 240 220 / 11%); border-bottom: 1px solid rgb(185 240 220 / 11%); font-size: 13px; white-space: nowrap; }
 .alert-result-item:nth-child(2n) { border-right: 0; }
+.alert-result-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.alert-new-badge { flex: 0 0 auto; margin-left: auto; padding: 2px 7px; color: #fff; background: var(--pxy-orange); border: 1px solid rgb(255 190 161 / 70%); border-radius: 3px; box-shadow: 0 0 10px rgb(255 138 91 / 28%); font-size: 9px; font-weight: 900; letter-spacing: .08em; line-height: 1.3; }
 .signal-pulse { flex: 0 0 auto; width: 6px; height: 6px; background: var(--pxy-orange); border-radius: 50%; box-shadow: 0 0 8px rgb(255 138 91 / 70%); }
 .alert-empty { display: grid; min-height: 320px; place-items: center; color: #75948a; font-size: 13px; }
 .alert-center-footer { display: flex; justify-content: space-between; gap: 20px; min-height: 36px; padding: 10px 16px; color: #6f9186; border-top: 1px solid rgb(185 240 220 / 15%); font-size: 11px; }
@@ -68,11 +70,13 @@ button { font: inherit; }
 .market-alert-popup::before, .market-alert-popup::after { content: ''; position: absolute; width: 24px; height: 24px; pointer-events: none; }
 .market-alert-popup::before { top: 7px; left: 7px; border-top: 2px solid var(--pxy-mint); border-left: 2px solid var(--pxy-mint); }
 .market-alert-popup::after { right: 7px; bottom: 7px; border-right: 2px solid var(--pxy-orange); border-bottom: 2px solid var(--pxy-orange); }
-.market-alert-popup header { display: grid; grid-template-columns: auto 1fr auto; gap: 3px 12px; padding: 19px 22px 12px; border-bottom: 1px solid rgb(185 240 220 / 18%); }
+.market-alert-popup header { display: grid; grid-template-columns: auto 1fr auto; gap: 3px 12px; padding: 19px 50px 12px 22px; border-bottom: 1px solid rgb(185 240 220 / 18%); }
 .market-alert-popup header span { grid-column: 1 / -1; color: var(--pxy-orange); font-size: 9px; font-weight: 800; letter-spacing: .2em; }
 .market-alert-popup header strong { font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
 .market-alert-popup header time { align-self: center; justify-self: start; padding: 2px 7px; color: #d7eee6; background: rgb(185 240 220 / 8%); border: 1px solid rgb(185 240 220 / 20%); border-radius: 4px; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .market-alert-popup header small { align-self: center; color: #91afa5; }
+.popup-close { position: absolute; z-index: 1; top: 13px; right: 14px; display: grid; width: 28px; height: 28px; padding: 0; place-items: center; color: #9bb7ae; background: rgb(185 240 220 / 6%); border: 1px solid rgb(185 240 220 / 18%); border-radius: 5px; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.popup-close:hover { color: #fff; background: rgb(255 138 91 / 16%); border-color: var(--pxy-orange); }
 .popup-signals { max-height: 230px; overflow: hidden; padding: 10px 22px 16px; }
 .popup-signals p { margin: 7px 0; color: var(--pxy-mint); font-size: 13px; line-height: 1.45; }
 .popup-countdown { height: 3px; background: linear-gradient(90deg, var(--pxy-orange), var(--pxy-mint)); transform-origin: left; animation: alert-countdown 5s linear forwards; }

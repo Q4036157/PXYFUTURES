@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Back, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
+import { Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
@@ -65,6 +65,7 @@ const alertFailedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
 const alertPopupBeijingTime = ref('')
+const latestAlertEventKeys = ref<Set<string>>(new Set())
 const alertStreamConnected = ref(false)
 const notificationPermission = ref<NotificationPermission | 'unsupported'>(
   typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
@@ -152,6 +153,10 @@ function alertEventKey(signal: AlertSignalSnapshot): string {
   return `${signal.contract_id}:${signal.period.duration_seconds}:${signal.cross_type}:${signal.cross_time}`
 }
 
+function isLatestAlertSignal(signal: AlertSignalSnapshot): boolean {
+  return latestAlertEventKeys.value.has(alertEventKey(signal))
+}
+
 function isFreshAlertSignal(signal: AlertSignalSnapshot): boolean {
   if (signal.period.duration_seconds >= 86_400) return true
   const confirmedAt = Date.parse(signal.confirmed_at)
@@ -229,6 +234,12 @@ function currentBeijingTime(): string {
   return `北京时间 ${time}`
 }
 
+function closeAlertPopup(): void {
+  if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
+  alertPopupTimer = undefined
+  alertPopupVisible.value = false
+}
+
 function showAlertNotification(items: AlertSignalSnapshot[]): void {
   const beijingTime = currentBeijingTime()
   alertPopupBeijingTime.value = beijingTime
@@ -239,6 +250,7 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
     if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
     alertPopupTimer = window.setTimeout(() => {
       alertPopupVisible.value = false
+      alertPopupTimer = undefined
     }, 5_000)
     return
   }
@@ -267,7 +279,10 @@ function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): vo
     return !seenAlertEvents.has(alertEventKey(signal))
   })
   for (const signal of newSignals) seenAlertEvents.add(alertEventKey(signal))
-  if (newSignals.length) showAlertNotification(newSignals)
+  if (newSignals.length) {
+    latestAlertEventKeys.value = new Set(newSignals.map(alertEventKey))
+    showAlertNotification(newSignals)
+  }
 }
 
 async function refreshAlertSignals(allowNotification = true): Promise<void> {
@@ -831,7 +846,9 @@ onBeforeUnmount(() => {
           <div class="alert-results">
             <div v-if="matchingAlertSignals.length" class="alert-result-grid">
               <div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item">
-                <span class="signal-pulse"></span><span>{{ alertText(signal) }}</span>
+                <span class="signal-pulse"></span>
+                <span class="alert-result-text">{{ alertText(signal) }}</span>
+                <span v-if="isLatestAlertSignal(signal)" class="alert-new-badge">NEW</span>
               </div>
             </div>
             <div v-else class="alert-empty">{{ alertStatusText }}</div>
@@ -848,6 +865,7 @@ onBeforeUnmount(() => {
     <Transition name="alert-popup">
       <aside v-if="alertPopupVisible" class="market-alert-popup" role="alert" aria-live="assertive">
         <div class="popup-scanline"></div>
+        <button type="button" class="popup-close" aria-label="关闭预警弹窗" @click="closeAlertPopup"><el-icon><Close /></el-icon></button>
         <header>
           <span>MARKET SIGNAL</span>
           <strong>智能期货预警</strong>
