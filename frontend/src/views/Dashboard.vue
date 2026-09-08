@@ -64,6 +64,7 @@ const alertScanError = ref('')
 const alertFailedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
+const alertPopupBeijingTime = ref('')
 const alertStreamConnected = ref(false)
 const notificationPermission = ref<NotificationPermission | 'unsupported'>(
   typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
@@ -217,7 +218,20 @@ function playAlertSound(): void {
   }
 }
 
+function currentBeijingTime(): string {
+  const time = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date())
+  return `北京时间 ${time}`
+}
+
 function showAlertNotification(items: AlertSignalSnapshot[]): void {
+  const beijingTime = currentBeijingTime()
+  alertPopupBeijingTime.value = beijingTime
   playAlertSound()
   if (!document.hidden) {
     alertPopupSignals.value = items
@@ -233,7 +247,7 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
     const preview = items.slice(0, 5).map(alertText).join('\n')
     const more = items.length > 5 ? `\n另有 ${items.length - 5} 条信号` : ''
     new Notification(`智能期货预警 · ${items.length}条新信号`, {
-      body: `${preview}${more}`,
+      body: `${beijingTime}\n${preview}${more}`,
       tag: 'pxy-futures-alert',
     })
   }
@@ -834,7 +848,12 @@ onBeforeUnmount(() => {
     <Transition name="alert-popup">
       <aside v-if="alertPopupVisible" class="market-alert-popup" role="alert" aria-live="assertive">
         <div class="popup-scanline"></div>
-        <header><span>MARKET SIGNAL</span><strong>智能期货预警</strong><small>{{ alertPopupSignals.length }} 条新信号</small></header>
+        <header>
+          <span>MARKET SIGNAL</span>
+          <strong>智能期货预警</strong>
+          <time>{{ alertPopupBeijingTime }}</time>
+          <small>{{ alertPopupSignals.length }} 条新信号</small>
+        </header>
         <div class="popup-signals">
           <p v-for="signal in alertPopupSignals.slice(0, 5)" :key="alertEventKey(signal)">{{ alertText(signal) }}</p>
           <p v-if="alertPopupSignals.length > 5">另有 {{ alertPopupSignals.length - 5 }} 条信号，请查看预警列表</p>
