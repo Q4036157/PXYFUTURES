@@ -41,7 +41,6 @@ const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 
 const credentials = ref({ username: '', password: '' })
 let timer: number | undefined
 let alertTimer: number | undefined
-let alertPopupTimer: number | undefined
 let alertSocketReconnectTimer: number | undefined
 let alertSocketHeartbeatTimer: number | undefined
 interface RequestController {
@@ -235,8 +234,6 @@ function currentBeijingTime(): string {
 }
 
 function closeAlertPopup(): void {
-  if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
-  alertPopupTimer = undefined
   alertPopupVisible.value = false
 }
 
@@ -247,11 +244,6 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
   if (!document.hidden) {
     alertPopupSignals.value = items
     alertPopupVisible.value = true
-    if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
-    alertPopupTimer = window.setTimeout(() => {
-      alertPopupVisible.value = false
-      alertPopupTimer = undefined
-    }, 5_000)
     return
   }
 
@@ -757,7 +749,6 @@ onBeforeUnmount(() => {
     alertSocket.close(1000, '页面已关闭')
     alertSocket = null
   }
-  if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
   for (const soundTimer of soundTimers) window.clearTimeout(soundTimer)
   soundTimers.clear()
   alertAudio?.pause()
@@ -876,7 +867,6 @@ onBeforeUnmount(() => {
           <p v-for="signal in alertPopupSignals.slice(0, 5)" :key="alertEventKey(signal)">{{ alertText(signal) }}</p>
           <p v-if="alertPopupSignals.length > 5">另有 {{ alertPopupSignals.length - 5 }} 条信号，请查看预警列表</p>
         </div>
-        <div class="popup-countdown"></div>
       </aside>
     </Transition>
 
