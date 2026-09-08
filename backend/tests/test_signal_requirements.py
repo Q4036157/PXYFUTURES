@@ -43,6 +43,7 @@ def test_snapshot_exposes_cross_and_confirmed_bar_times() -> None:
 
     assert snapshot["cross_time"] == "1970-01-01T08:00:05+08:00"
     assert snapshot["confirmed_bar_time"] == "1970-01-01T08:00:05+08:00"
+    assert snapshot["confirmed_at"] == "1970-01-01T08:00:06+08:00"
 
 
 def test_alert_snapshot_ignores_entire_in_progress_bar() -> None:
@@ -73,6 +74,7 @@ def test_alert_snapshot_ignores_entire_in_progress_bar() -> None:
         "bar_close",
         "bar_time",
         "confirmed_bar_time",
+        "confirmed_at",
     )
     assert {field: low_snapshot[field] for field in stable_fields} == {
         field: high_snapshot[field] for field in stable_fields
@@ -80,6 +82,7 @@ def test_alert_snapshot_ignores_entire_in_progress_bar() -> None:
     assert low_snapshot["bar_close"] == 8
     assert low_snapshot["bar_time"] == "1970-01-01T08:00:06+08:00"
     assert low_snapshot["confirmed_bar_time"] == low_snapshot["bar_time"]
+    assert low_snapshot["confirmed_at"] == "1970-01-01T08:00:07+08:00"
 
 
 class MixedHistoryClient:

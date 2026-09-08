@@ -29,6 +29,7 @@ export interface SignalSnapshot {
   bar_close: number
   bar_time: string
   confirmed_bar_time: string
+  confirmed_at: string
   data_source: 'live' | 'cache'
   data_updated_at: string | null
 }

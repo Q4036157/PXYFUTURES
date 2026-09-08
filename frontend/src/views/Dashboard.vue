@@ -67,6 +67,7 @@ const notificationPermission = ref<NotificationPermission | 'unsupported'>(
 const seenAlertEvents = new Set<string>()
 const soundTimers = new Set<number>()
 const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
+const ALERT_FRESHNESS_MS = 3 * 60 * 1_000
 let alertAudio: HTMLAudioElement | null = null
 let alertRescanPending = false
 let signalRetryAfter = 0
@@ -140,6 +141,14 @@ function alertText(signal: AlertSignalSnapshot): string {
 
 function alertEventKey(signal: AlertSignalSnapshot): string {
   return `${signal.contract_id}:${signal.period.duration_seconds}:${signal.cross_type}:${signal.cross_time}`
+}
+
+function isFreshAlertSignal(signal: AlertSignalSnapshot): boolean {
+  if (signal.period.duration_seconds >= 86_400) return true
+  const confirmedAt = Date.parse(signal.confirmed_at)
+  if (!Number.isFinite(confirmedAt)) return false
+  const age = Date.now() - confirmedAt
+  return age >= -10_000 && age <= ALERT_FRESHNESS_MS
 }
 
 function getAlertAudio(): HTMLAudioElement {
@@ -246,6 +255,7 @@ async function refreshAlertSignals(): Promise<void> {
       const condition = alertCondition(signal)
       if (!condition || !selectedConditions.has(condition)) return false
       if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
+      if (!isFreshAlertSignal(signal)) return false
       return !seenAlertEvents.has(alertEventKey(signal))
     })
     for (const signal of newSignals) seenAlertEvents.add(alertEventKey(signal))

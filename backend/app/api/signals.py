@@ -121,6 +121,8 @@ def _snapshot_from_market_bars(
         "bar_close": calculation_bars[-1].close,
         "bar_time": _iso_time(calculation_bars[-1].timestamp_ns),
         "confirmed_bar_time": _iso_time(bars[-2].timestamp_ns),
+        # 下一根 K 线出现时，上一根才具备确定的收盘确认；该时刻用于拦截迟到旧提醒。
+        "confirmed_at": _iso_time(bars[-1].timestamp_ns),
         "data_source": market_bars.source,
         "data_updated_at": (
             datetime.fromtimestamp(
