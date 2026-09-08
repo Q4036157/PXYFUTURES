@@ -17,6 +17,14 @@ export const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+export function alertWebSocketUrl(): string {
+  const baseUrl = String(client.defaults.baseURL || '/api')
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+  const url = new URL('contracts/alerts/ws', new URL(normalizedBase, window.location.href))
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}
+
 client.interceptors.request.use((config) => {
   // 体验站由主平台下发 app_session；它比主平台完整 access token 优先。
   // 期货服务不再接受本地密码或主平台完整 JWT。

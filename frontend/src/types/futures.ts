@@ -46,6 +46,13 @@ export interface AlertScanResult {
   failed: number
 }
 
+export interface AlertStreamSnapshot extends AlertScanResult {
+  type: 'snapshot'
+  trigger: 'initial' | 'bar_closed'
+  source_received_at?: string
+  server_sent_at: string
+}
+
 export interface ContractSignals {
   contract_id: number
   symbol: string

@@ -2,12 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Back, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { client } from '@/api/client'
+import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
 import alertSoundUrl from '@/assets/ok3.wav?url'
 import type {
   AlertScanResult,
   AlertSignalSnapshot,
+  AlertStreamSnapshot,
   ContractConfig,
   ContractSignals,
   PeriodConfig,
@@ -41,6 +42,8 @@ const credentials = ref({ username: '', password: '' })
 let timer: number | undefined
 let alertTimer: number | undefined
 let alertPopupTimer: number | undefined
+let alertSocketReconnectTimer: number | undefined
+let alertSocketHeartbeatTimer: number | undefined
 interface RequestController {
   readonly aborted: boolean
   signal?: AbortSignal
@@ -61,6 +64,7 @@ const alertScanError = ref('')
 const alertFailedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
+const alertStreamConnected = ref(false)
 const notificationPermission = ref<NotificationPermission | 'unsupported'>(
   typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
 )
@@ -70,6 +74,9 @@ const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 const ALERT_FRESHNESS_MS = 3 * 60 * 1_000
 let alertAudio: HTMLAudioElement | null = null
 let alertRescanPending = false
+let alertSocket: WebSocket | null = null
+let alertSocketReconnectDelay = 1_000
+let dashboardMounted = false
 let signalRetryAfter = 0
 const platformReturnVisible = window.location.pathname === '/futures-app'
   || window.location.pathname.startsWith('/futures-app/')
@@ -127,7 +134,8 @@ const alertStatusText = computed(() => {
   if (alertFailedCount.value) {
     return `当前匹配 ${matchingAlertSignals.value.length} 条，${alertFailedCount.value} 条等待行情缓存`
   }
-  return `当前匹配 ${matchingAlertSignals.value.length} 条`
+  const channel = alertStreamConnected.value ? '实时推送' : '连接恢复中'
+  return `当前匹配 ${matchingAlertSignals.value.length} 条 · ${channel}`
 })
 
 function alertCondition(signal: AlertSignalSnapshot): AlertCondition | null {
@@ -180,7 +188,8 @@ function toggleAlertDuration(durationSeconds: number): void {
   selectedAlertDurations.value = selectedAlertDurations.value.includes(durationSeconds)
     ? selectedAlertDurations.value.filter((value) => value !== durationSeconds)
     : [...selectedAlertDurations.value, durationSeconds]
-  void refreshAlertSignals()
+  syncAlertSubscription()
+  if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
 function toggleAlertCondition(condition: AlertCondition): void {
@@ -188,7 +197,8 @@ function toggleAlertCondition(condition: AlertCondition): void {
   selectedAlertConditions.value = selectedAlertConditions.value.includes(condition)
     ? selectedAlertConditions.value.filter((value) => value !== condition)
     : [...selectedAlertConditions.value, condition]
-  void refreshAlertSignals()
+  syncAlertSubscription()
+  if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
 function playAlertSound(): void {
@@ -229,7 +239,24 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
   }
 }
 
-async function refreshAlertSignals(): Promise<void> {
+function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): void {
+  alertSignals.value = data.signals
+  alertFailedCount.value = data.failed
+  if (!allowNotification) return
+
+  const selectedConditions = new Set(selectedAlertConditions.value)
+  const newSignals = data.signals.filter((signal) => {
+    const condition = alertCondition(signal)
+    if (!condition || !selectedConditions.has(condition)) return false
+    if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
+    if (!isFreshAlertSignal(signal)) return false
+    return !seenAlertEvents.has(alertEventKey(signal))
+  })
+  for (const signal of newSignals) seenAlertEvents.add(alertEventKey(signal))
+  if (newSignals.length) showAlertNotification(newSignals)
+}
+
+async function refreshAlertSignals(allowNotification = true): Promise<void> {
   if (alertScanning.value) {
     alertRescanPending = true
     return
@@ -247,28 +274,101 @@ async function refreshAlertSignals(): Promise<void> {
     const { data } = await client.post<AlertScanResult>('/contracts/alerts/scan', {
       durations: selectedAlertDurations.value,
     })
-    alertSignals.value = data.signals
-    alertFailedCount.value = data.failed
-
-    const selectedConditions = new Set(selectedAlertConditions.value)
-    const newSignals = data.signals.filter((signal) => {
-      const condition = alertCondition(signal)
-      if (!condition || !selectedConditions.has(condition)) return false
-      if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
-      if (!isFreshAlertSignal(signal)) return false
-      return !seenAlertEvents.has(alertEventKey(signal))
-    })
-    for (const signal of newSignals) seenAlertEvents.add(alertEventKey(signal))
-    if (newSignals.length) showAlertNotification(newSignals)
+    applyAlertSnapshot(data, allowNotification)
   } catch (error: any) {
     alertScanError.value = error.response?.data?.detail || '预警扫描暂时不可用'
   } finally {
     alertScanning.value = false
     if (alertRescanPending) {
       alertRescanPending = false
-      void refreshAlertSignals()
+      void refreshAlertSignals(allowNotification)
     }
   }
+}
+
+function monitoredAlertDurations(): number[] {
+  if (!selectedAlertConditions.value.length) return []
+  return selectedAlertDurations.value
+}
+
+function syncAlertSubscription(): void {
+  if (alertSocket?.readyState !== WebSocket.OPEN) return
+  alertSocket.send(JSON.stringify({
+    type: 'subscribe',
+    durations: monitoredAlertDurations(),
+  }))
+}
+
+function clearAlertSocketTimers(): void {
+  if (alertSocketReconnectTimer) {
+    window.clearTimeout(alertSocketReconnectTimer)
+    alertSocketReconnectTimer = undefined
+  }
+  if (alertSocketHeartbeatTimer) {
+    window.clearInterval(alertSocketHeartbeatTimer)
+    alertSocketHeartbeatTimer = undefined
+  }
+}
+
+function scheduleAlertSocketReconnect(): void {
+  if (!dashboardMounted || alertSocketReconnectTimer) return
+  alertSocketReconnectTimer = window.setTimeout(() => {
+    alertSocketReconnectTimer = undefined
+    connectAlertStream()
+  }, alertSocketReconnectDelay)
+  alertSocketReconnectDelay = Math.min(15_000, alertSocketReconnectDelay * 2)
+}
+
+function connectAlertStream(): void {
+  if (!dashboardMounted || alertSocket?.readyState === WebSocket.OPEN
+    || alertSocket?.readyState === WebSocket.CONNECTING) return
+
+  const socket = new WebSocket(alertWebSocketUrl())
+  alertSocket = socket
+  socket.addEventListener('open', () => {
+    if (alertSocket !== socket) return
+    alertStreamConnected.value = true
+    alertScanError.value = ''
+    alertSocketReconnectDelay = 1_000
+    syncAlertSubscription()
+    if (alertSocketHeartbeatTimer) window.clearInterval(alertSocketHeartbeatTimer)
+    alertSocketHeartbeatTimer = window.setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'ping' }))
+      }
+    }, 20_000)
+  })
+  socket.addEventListener('message', (event) => {
+    if (alertSocket !== socket) return
+    try {
+      const message = JSON.parse(String(event.data)) as AlertStreamSnapshot | { type: string }
+      if (message.type === 'snapshot') {
+        applyAlertSnapshot(message as AlertStreamSnapshot)
+        alertScanning.value = false
+      } else if (message.type === 'invalid_subscription') {
+        alertScanError.value = '预警周期配置无效'
+      }
+    } catch {
+      alertScanError.value = '实时预警消息解析失败'
+    }
+  })
+  socket.addEventListener('close', (event) => {
+    if (alertSocket !== socket) return
+    alertSocket = null
+    alertStreamConnected.value = false
+    if (alertSocketHeartbeatTimer) {
+      window.clearInterval(alertSocketHeartbeatTimer)
+      alertSocketHeartbeatTimer = undefined
+    }
+    if (event.code === 4401) {
+      const loginUrl = `/login?redirect=${encodeURIComponent('/apps/launch/futures')}`
+      const targetWindow = window.top ?? window
+      targetWindow.location.replace(loginUrl)
+      return
+    }
+    scheduleAlertSocketReconnect()
+  })
+  socket.addEventListener('error', () => socket.close())
 }
 
 function createRequestController(): RequestController {
@@ -598,10 +698,15 @@ async function saveCredentials(): Promise<void> {
 }
 
 onMounted(async () => {
+  dashboardMounted = true
   try {
     await loadContracts()
     timer = window.setInterval(() => void refreshSignals(), 3_000)
-    alertTimer = window.setInterval(() => void refreshAlertSignals(), 10_000)
+    alertTimer = window.setInterval(
+      () => void refreshAlertSignals(!alertStreamConnected.value),
+      30_000,
+    )
+    connectAlertStream()
   } catch (error: any) {
     if (error.response?.status === 401) {
       const loginUrl = `/login?redirect=${encodeURIComponent('/apps/launch/futures')}`
@@ -614,8 +719,15 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  dashboardMounted = false
   if (timer) window.clearInterval(timer)
   if (alertTimer) window.clearInterval(alertTimer)
+  clearAlertSocketTimers()
+  if (alertSocket) {
+    alertSocket.onclose = null
+    alertSocket.close(1000, '页面已关闭')
+    alertSocket = null
+  }
   if (alertPopupTimer) window.clearTimeout(alertPopupTimer)
   for (const soundTimer of soundTimers) window.clearTimeout(soundTimer)
   soundTimers.clear()

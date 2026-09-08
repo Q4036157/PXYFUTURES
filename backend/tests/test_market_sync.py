@@ -31,9 +31,27 @@ def test_build_jobs_includes_all_contracts_and_merges_duplicate_periods() -> Non
     jobs = build_market_sync_jobs(contracts)
 
     assert [(job.symbol, job.duration_seconds, job.count) for job in jobs] == [
-        ("DCE.PP2701", 7200, 541),
+        ("DCE.PP2701", 300, 12984),
         ("DCE.PP2701", 86400, 481),
-        ("DCE.V2609", 7200, 401),
+        ("DCE.V2609", 300, 9624),
+    ]
+
+
+def test_build_jobs_deduplicates_periods_that_share_a_base_series() -> None:
+    contracts = [
+        ContractConfig(
+            1,
+            "CZCE.UR701",
+            "UR701",
+            [_period(180, 200), _period(900, 240), _period(1800, 240)],
+        )
+    ]
+
+    jobs = build_market_sync_jobs(contracts)
+
+    assert [(job.duration_seconds, job.count) for job in jobs] == [
+        (60, 1503),
+        (300, 3186),
     ]
 
 
@@ -80,3 +98,42 @@ def test_sync_loop_can_stop_after_one_cycle() -> None:
             interval_seconds=0.01,
         )
     )
+
+
+def test_sync_loop_publishes_rollover_without_fixed_sleep() -> None:
+    stop_event = asyncio.Event()
+    received = []
+
+    class Repository:
+        @staticmethod
+        def list_all_contracts() -> list[ContractConfig]:
+            return [ContractConfig(1, "CZCE.UR701", "UR701", [_period(180, 200)])]
+
+    class Client:
+        @staticmethod
+        def wait_for_bar_rollovers(*_args: object) -> object:
+            return type(
+                "Rollover",
+                (),
+                {
+                    "changed_sources": {("CZCE.UR701", 60): 123},
+                    "received_at_ns": 456,
+                },
+            )()
+
+    async def run() -> None:
+        async def on_rollover(event: object) -> None:
+            received.append(event)
+            stop_event.set()
+
+        await run_market_sync_loop(
+            Client(),  # type: ignore[arg-type]
+            Repository(),  # type: ignore[arg-type]
+            stop_event,
+            on_rollover=on_rollover,  # type: ignore[arg-type]
+        )
+
+    asyncio.run(run())
+
+    assert received[0].changed_sources == {("CZCE.UR701", 60): 123}
+    assert received[0].received_at_ns == 456

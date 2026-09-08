@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from math import ceil
 from threading import Lock
 from time import monotonic, time, time_ns
+from typing import Protocol, Sequence
 
 from app.config import settings
 from app.market.boyi_kline import (
@@ -45,6 +46,28 @@ class MarketBars:
     bars: list[Bar]
     source: str
     updated_at_ns: int | None
+
+
+class MarketSourceJob(Protocol):
+    symbol: str
+    duration_seconds: int
+    count: int
+
+
+@dataclass(frozen=True)
+class MarketRollover:
+    """一批基础K线发生切换的时间信息。"""
+
+    changed_sources: dict[tuple[str, int], int]
+    received_at_ns: int
+
+
+@dataclass
+class _LiveKlineSeries:
+    frame: object
+    data_length: int
+    cache_count: int
+    latest_timestamp_ns: int | None
 
 
 class _TqConnectionNoticeLimiter:
@@ -105,6 +128,7 @@ class TqClient:
         self._history_shortage_notices: set[tuple[str, int, int, int]] = set()
         self._active_contract_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
         self._connection_notice_limiter = _TqConnectionNoticeLimiter()
+        self._live_kline_series: dict[tuple[str, int], _LiveKlineSeries] = {}
 
     def _get_api(self) -> object:
         if self._api is not None:
@@ -148,6 +172,105 @@ class TqClient:
         if should_rebuild_for_boyi(duration_seconds):
             return self._fetch_boyi_bars(symbol, duration_seconds, count, repository)
         return self._fetch_native_bars(symbol, duration_seconds, count, repository)
+
+    def wait_for_bar_rollovers(
+        self,
+        jobs: Sequence[MarketSourceJob],
+        repository: ConfigRepository,
+        timeout_seconds: float,
+    ) -> MarketRollover:
+        """复用天勤内存序列，行情到达后只落库发生切换的基础K线。"""
+        with self._lock:
+            api = self._get_api()
+            active_keys: list[tuple[str, int]] = []
+            for job in jobs:
+                key = (job.symbol, job.duration_seconds)
+                active_keys.append(key)
+                data_length = min(_MAX_TQ_KLINE_BARS, max(10, job.count))
+                series = self._live_kline_series.get(key)
+                if series is not None and series.data_length >= data_length:
+                    series.cache_count = max(series.cache_count, job.count)
+                    continue
+
+                frame = api.get_kline_serial(
+                    to_tq_symbol(job.symbol),
+                    duration_seconds=job.duration_seconds,
+                    data_length=data_length,
+                )
+                remote_bars = self._remote_bars(frame)
+                synced_at_ns = time_ns()
+                if remote_bars:
+                    repository.save_kline_bars(
+                        job.symbol,
+                        job.duration_seconds,
+                        remote_bars,
+                        job.count,
+                        synced_at_ns,
+                    )
+                self._live_kline_series[key] = _LiveKlineSeries(
+                    frame=frame,
+                    data_length=data_length,
+                    cache_count=job.count,
+                    latest_timestamp_ns=remote_bars[-1][0] if remote_bars else None,
+                )
+
+            received_at_ns = time_ns()
+            changed = self._collect_bar_rollovers(active_keys, repository, received_at_ns)
+            if changed:
+                return MarketRollover(changed, received_at_ns)
+
+            api.wait_update(deadline=time() + max(0.05, timeout_seconds))
+            self._last_live_update_monotonic = monotonic()
+            received_at_ns = time_ns()
+            return MarketRollover(
+                self._collect_bar_rollovers(active_keys, repository, received_at_ns),
+                received_at_ns,
+            )
+
+    def _collect_bar_rollovers(
+        self,
+        active_keys: Sequence[tuple[str, int]],
+        repository: ConfigRepository,
+        synced_at_ns: int,
+    ) -> dict[tuple[str, int], int]:
+        changed: dict[tuple[str, int], int] = {}
+        for key in active_keys:
+            series = self._live_kline_series[key]
+            latest_rows = self._remote_bars(series.frame, tail=10)
+            if not latest_rows:
+                continue
+            latest_timestamp_ns = latest_rows[-1][0]
+            if series.latest_timestamp_ns is None:
+                repository.save_kline_bars(
+                    key[0],
+                    key[1],
+                    latest_rows,
+                    series.cache_count,
+                    synced_at_ns,
+                )
+                series.latest_timestamp_ns = latest_timestamp_ns
+                continue
+            if latest_timestamp_ns <= series.latest_timestamp_ns:
+                continue
+            repository.save_kline_bars(
+                key[0],
+                key[1],
+                latest_rows,
+                series.cache_count,
+                synced_at_ns,
+            )
+            series.latest_timestamp_ns = latest_timestamp_ns
+            changed[key] = latest_timestamp_ns
+        return changed
+
+    @staticmethod
+    def _remote_bars(frame: object, tail: int | None = None) -> list[tuple[int, float]]:
+        source = frame.tail(tail) if tail is not None else frame
+        return [
+            (int(row.datetime), float(row.close))
+            for row in source.itertuples(index=False)
+            if float(row.close) > 0 and int(row.datetime) > 0
+        ]
 
     def _fetch_boyi_bars(
         self,
@@ -217,11 +340,7 @@ class TqClient:
                 if monotonic() - self._last_live_update_monotonic >= 0.2:
                     api.wait_update(deadline=time() + 0.25)
                     self._last_live_update_monotonic = monotonic()
-                remote_bars = [
-                    (int(row.datetime), float(row.close))
-                    for row in frame.itertuples(index=False)
-                    if float(row.close) > 0 and int(row.datetime) > 0
-                ]
+                remote_bars = self._remote_bars(frame)
                 synced_at_ns = time_ns()
                 repository.save_kline_bars(
                     symbol,

@@ -16,6 +16,7 @@ from app.api import auth, contracts, signals
 from app.api import settings as settings_api
 from app.config import settings
 from app.market.tq_client import TqClient
+from app.services.alert_stream import AlertStreamService
 from app.services.market_sync import run_market_sync_loop
 from app.services.repository import ConfigRepository
 
@@ -37,12 +38,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     app.state.config_repository = ConfigRepository()
     app.state.tq_client = TqClient()
+    app.state.alert_stream = AlertStreamService(
+        app.state.config_repository,
+        signals.scan_cached_alerts_for_user,
+    )
     app.state.market_sync_stop = asyncio.Event()
     app.state.market_sync_task = asyncio.create_task(
         run_market_sync_loop(
             app.state.tq_client,
             app.state.config_repository,
             app.state.market_sync_stop,
+            on_rollover=app.state.alert_stream.publish_rollovers,
         ),
         name="market-data-sync",
     )
@@ -53,6 +59,7 @@ async def lifespan(app: FastAPI):
     finally:
         app.state.market_sync_stop.set()
         await app.state.market_sync_task
+        await app.state.alert_stream.close()
         app.state.tq_client.close()
 
 

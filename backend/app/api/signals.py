@@ -7,8 +7,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.market.boyi_kline import (
     base_count_for,
@@ -18,7 +18,9 @@ from app.market.boyi_kline import (
 )
 from app.market.ma_engine import Bar, MovingAverageConfig, calculate_signal
 from app.market.tq_client import MarketBars, MarketDataUnavailable, TqClient
+from app.services import auth as auth_service
 from app.services.auth import current_user_id
+from app.services.alert_stream import AlertStreamService, AlertSubscriber
 from app.services.repository import ConfigRepository, ContractConfig, PeriodConfig
 
 router = APIRouter(prefix="/api/contracts", tags=["均线信号"])
@@ -207,6 +209,78 @@ def _scan_cached_alert_jobs(
     return snapshots, failed
 
 
+def scan_cached_alerts_for_user(
+    repository: ConfigRepository,
+    user_id: str,
+    durations: frozenset[int],
+) -> dict[str, object]:
+    """供HTTP扫描和WebSocket收K推送共同使用同一份确定性计算。"""
+    if not durations:
+        return {"signals": [], "requested": 0, "failed": 0}
+    jobs = [
+        (contract, period)
+        for contract in repository.list_contracts(user_id)
+        for period in contract.periods
+        if period.duration_seconds in durations
+    ]
+    snapshots, failed = _scan_cached_alert_jobs(repository, jobs)
+    return {"signals": snapshots, "requested": len(jobs), "failed": failed}
+
+
+def _websocket_user_id(websocket: WebSocket) -> str | None:
+    token = websocket.cookies.get("pxy_futures_session", "").strip()
+    return auth_service._decode_app_session(token) if token else None
+
+
+async def _send_alert_messages(websocket: WebSocket, subscriber: AlertSubscriber) -> None:
+    queue = subscriber.queue
+    while True:
+        await websocket.send_json(await queue.get())
+
+
+@router.websocket("/alerts/ws")
+async def stream_alerts(websocket: WebSocket) -> None:
+    """通过主平台会话认证，向当前打开页面实时推送收K快照。"""
+    user_id = _websocket_user_id(websocket)
+    if user_id is None:
+        await websocket.close(code=4401, reason="主平台登录已失效")
+        return
+
+    service: AlertStreamService = websocket.app.state.alert_stream
+    await websocket.accept()
+    subscriber = service.register(user_id)
+    service.offer_control(subscriber.id, "connected")
+    sender = asyncio.create_task(
+        _send_alert_messages(websocket, subscriber),
+        name=f"alert-stream-sender-{subscriber.id}",
+    )
+    try:
+        while True:
+            message = await websocket.receive_json()
+            message_type = str(message.get("type", ""))
+            if message_type == "ping":
+                service.offer_control(subscriber.id, "pong")
+                continue
+            if message_type != "subscribe":
+                service.offer_control(subscriber.id, "invalid_message")
+                continue
+            try:
+                body = AlertScanBody.model_validate(message)
+            except ValidationError:
+                service.offer_control(subscriber.id, "invalid_subscription")
+                continue
+            await service.update(subscriber.id, frozenset(body.durations))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sender.cancel()
+        try:
+            await sender
+        except (asyncio.CancelledError, WebSocketDisconnect):
+            pass
+        await service.unregister(subscriber.id)
+
+
 @router.get("/{contract_id}/signals")
 async def get_signals(
     contract_id: int, request: Request, user_id: str = Depends(current_user_id)
@@ -264,20 +338,10 @@ async def scan_alerts(
     user_id: str = Depends(current_user_id),
 ) -> dict[str, object]:
     """批量计算当前用户自选合约中已配置的预警周期。"""
-    if not body.durations:
-        return {"signals": [], "requested": 0, "failed": 0}
-
     repository: ConfigRepository = request.app.state.config_repository
-    selected_durations = set(body.durations)
-    jobs = [
-        (contract, period)
-        for contract in repository.list_contracts(user_id)
-        for period in contract.periods
-        if period.duration_seconds in selected_durations
-    ]
-    snapshots, failed = await asyncio.to_thread(
-        _scan_cached_alert_jobs,
+    return await asyncio.to_thread(
+        scan_cached_alerts_for_user,
         repository,
-        jobs,
+        user_id,
+        frozenset(body.durations),
     )
-    return {"signals": snapshots, "requested": len(jobs), "failed": failed}
