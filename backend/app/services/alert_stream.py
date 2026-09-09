@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 from uuid import uuid4
 
 from app.services.market_sync import MarketSyncEvent

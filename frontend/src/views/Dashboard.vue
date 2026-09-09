@@ -49,6 +49,14 @@ interface RequestController {
   abort: () => void
 }
 
+interface TqCredentialStatus {
+  configured: boolean
+  status: 'unconfigured' | 'unknown' | 'valid' | 'invalid' | 'unavailable'
+  checked_at: string | null
+  message: string
+  source: string
+}
+
 let signalAbortController: RequestController | null = null
 let refreshingContractId: number | null = null
 const dirtyNoteDurations = new Set<number>()
@@ -69,6 +77,8 @@ const alertStreamConnected = ref(false)
 const notificationPermission = ref<NotificationPermission | 'unsupported'>(
   typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
 )
+const credentialStatus = ref<TqCredentialStatus | null>(null)
+const credentialsSaving = ref(false)
 const seenAlertEvents = new Set<string>()
 const soundTimers = new Set<number>()
 const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
@@ -707,15 +717,48 @@ async function removePeriod(period: PeriodConfig): Promise<void> {
 }
 
 async function saveCredentials(): Promise<void> {
+  if (credentialsSaving.value) return
+  credentialsSaving.value = true
   try {
-    await client.put('/settings/tq-credentials', credentials.value)
+    const { data } = await client.put<TqCredentialStatus>(
+      '/settings/tq-credentials',
+      credentials.value,
+    )
+    credentialStatus.value = data
     credentials.value = { username: '', password: '' }
     credentialsVisible.value = false
-    ElMessage.success('天勤账号已保存')
+    ElMessage.success('天勤账号已通过真实认证并保存')
     await refreshSignals(true)
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.detail || '保存失败')
+    const detail = error.response?.data?.detail || '认证失败，请检查网络后重试'
+    credentialStatus.value = {
+      configured: credentialStatus.value?.configured ?? false,
+      status: error.response?.status === 422 ? 'invalid' : 'unavailable',
+      checked_at: new Date().toISOString(),
+      message: detail,
+      source: 'save_validation',
+    }
+    ElMessage.error(detail)
+  } finally {
+    credentialsSaving.value = false
   }
+}
+
+async function openCredentials(): Promise<void> {
+  credentialsVisible.value = true
+  try {
+    const { data } = await client.get<TqCredentialStatus>('/settings/tq-credentials')
+    credentialStatus.value = data
+  } catch {
+    credentialStatus.value = null
+  }
+}
+
+function credentialAlertType(): 'success' | 'error' | 'warning' | 'info' {
+  if (credentialStatus.value?.status === 'valid') return 'success'
+  if (credentialStatus.value?.status === 'invalid') return 'error'
+  if (credentialStatus.value?.status === 'unavailable') return 'warning'
+  return 'info'
 }
 
 onMounted(async () => {
@@ -778,7 +821,7 @@ onBeforeUnmount(() => {
           <span>返回平台主页</span>
         </a>
         <el-button :icon="Refresh" :loading="refreshing" plain @click="refreshSignals(true)">更新数据</el-button>
-        <el-button :icon="Setting" plain @click="credentialsVisible = true">天勤账号</el-button>
+        <el-button :icon="Setting" plain @click="openCredentials">天勤账号</el-button>
         <el-button type="primary" :icon="Plus" @click="addVisible = true">添加合约</el-button>
       </div>
     </header>
@@ -886,8 +929,9 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <el-dialog v-model="credentialsVisible" title="天勤账号" width="420px" destroy-on-close>
-      <el-form label-position="top" @submit.prevent="saveCredentials"><el-form-item label="用户名"><el-input v-model="credentials.username" autocomplete="username" /></el-form-item><el-form-item label="密码"><el-input v-model="credentials.password" type="password" show-password autocomplete="current-password" /></el-form-item></el-form>
-      <template #footer><el-button @click="credentialsVisible = false">取消</el-button><el-button type="primary" @click="saveCredentials">保存</el-button></template>
+      <el-alert v-if="credentialStatus" :title="credentialStatus.message" :type="credentialAlertType()" :closable="false" show-icon />
+      <el-form class="credentials-form" label-position="top" @submit.prevent="saveCredentials"><el-form-item label="用户名"><el-input v-model="credentials.username" autocomplete="username" /></el-form-item><el-form-item label="密码"><el-input v-model="credentials.password" type="password" show-password autocomplete="current-password" /></el-form-item></el-form>
+      <template #footer><el-button @click="credentialsVisible = false">取消</el-button><el-button type="primary" :loading="credentialsSaving" @click="saveCredentials">验证并保存</el-button></template>
     </el-dialog>
   </main>
 </template>

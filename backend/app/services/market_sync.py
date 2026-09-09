@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
-from typing import Awaitable, Callable
 
 from app.market.boyi_kline import base_count_for, base_duration_for, should_rebuild_for_boyi
-from app.market.tq_client import TqClient
+from app.market.tq_client import TqClient, TqCredentialsInvalid
 from app.services.repository import ConfigRepository, ContractConfig
 
 logger = logging.getLogger(__name__)
@@ -145,7 +145,19 @@ async def run_market_sync_loop(
                 repository,
                 _MARKET_EVENT_WAIT_SECONDS,
             )
-        except Exception:  # noqa: BLE001
+        except TqCredentialsInvalid as exc:
+            blocked_revision = client.credential_revision
+            logger.warning("后台行情认证已暂停: %s；等待重新保存天勤账号", exc)
+            while (
+                not stop_event.is_set()
+                and client.credential_revision == blocked_revision
+            ):
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+            continue
+        except Exception:
             logger.warning("天勤事件同步暂时失败，3秒后重试", exc_info=True)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=3.0)

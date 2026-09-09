@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import ceil
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Protocol, Sequence
+from typing import Protocol
 
 from app.config import settings
 from app.market.boyi_kline import (
@@ -31,8 +31,17 @@ _MAX_CACHED_BASE_BARS = 50_000
 _CONNECTION_NOTICE_INTERVAL_SECONDS = 15 * 60
 
 
+def _is_explicit_credential_rejection(error: BaseException) -> bool:
+    error_text = str(error)
+    return "invalid_grant" in error_text or "Invalid user credentials" in error_text
+
+
 class MarketDataUnavailable(RuntimeError):
     """天勤未配置或行情暂不可用。"""
+
+
+class TqCredentialsInvalid(MarketDataUnavailable):
+    """天勤认证服务明确拒绝了当前账号凭据。"""
 
 
 class ContractUnavailable(ValueError):
@@ -129,10 +138,40 @@ class TqClient:
         self._active_contract_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
         self._connection_notice_limiter = _TqConnectionNoticeLimiter()
         self._live_kline_series: dict[tuple[str, int], _LiveKlineSeries] = {}
+        self._credential_error: str | None = None
+        self._credential_revision = 0
+
+    @property
+    def credential_revision(self) -> int:
+        return self._credential_revision
+
+    @staticmethod
+    def validate_credentials(username: str, password: str) -> None:
+        """只调用天勤认证接口校验凭据，不创建行情任务或记录敏感内容。"""
+        try:
+            from tqsdk import TqAuth
+        except ModuleNotFoundError as exc:
+            raise MarketDataUnavailable("当前环境未安装天勤 SDK") from exc
+
+        try:
+            TqAuth(username.strip(), password).login()
+        except Exception as exc:
+            if _is_explicit_credential_rejection(exc):
+                raise TqCredentialsInvalid("天勤账号或密码错误，请重新输入") from exc
+            raise MarketDataUnavailable("天勤认证服务暂时不可用，请检查网络后重试") from exc
+
+    def credentials_changed(self) -> None:
+        """凭据成功更新后清除永久阻断，并关闭旧行情连接。"""
+        self.close()
+        self._credential_error = None
+        self._remote_retry_after_monotonic = 0.0
+        self._credential_revision += 1
 
     def _get_api(self) -> object:
         if self._api is not None:
             return self._api
+        if self._credential_error is not None:
+            raise TqCredentialsInvalid(self._credential_error)
         username, password = get_tq_credentials()
         username = username or settings.tq_user_name
         password = password or settings.tq_password
@@ -146,6 +185,20 @@ class TqClient:
                 "当前后端环境未安装天勤 SDK，请运行 QIHUOBAT\\安装依赖.bat，或将 tqsdk 安装到当前 Python 环境"
             ) from exc
 
+        from app.services.tq_auth_state import record_tq_auth_state
+
+        try:
+            self.validate_credentials(username, password)
+        except TqCredentialsInvalid as exc:
+            self._credential_error = str(exc)
+            record_tq_auth_state("invalid", str(exc), "runtime")
+            logger.error("天勤认证被拒绝，已停止自动重试；重新保存账号后恢复")
+            raise
+        except MarketDataUnavailable as exc:
+            record_tq_auth_state("unavailable", str(exc), "runtime")
+            logger.warning("天勤认证服务暂时不可用: %s", exc)
+            raise
+
         try:
             notice_limiter = self._connection_notice_limiter
 
@@ -156,9 +209,21 @@ class TqClient:
                     super()._print(msg, level)
 
             self._api = FilteredTqApi(auth=TqAuth(username, password))
+            record_tq_auth_state("valid", "天勤账号认证成功，行情连接已建立", "runtime")
+            logger.info("天勤账号认证成功，行情连接已建立")
             return self._api
         except Exception as exc:
-            logger.exception("天勤连接失败")
+            if _is_explicit_credential_rejection(exc):
+                self._credential_error = "天勤账号或密码错误，请重新输入"
+                record_tq_auth_state("invalid", self._credential_error, "runtime")
+                logger.error("天勤认证被拒绝，已停止自动重试；重新保存账号后恢复")
+                raise TqCredentialsInvalid(self._credential_error) from exc
+            record_tq_auth_state(
+                "unavailable",
+                "天勤账号已通过认证，但行情连接建立失败",
+                "runtime",
+            )
+            logger.warning("天勤账号已通过认证，但行情连接建立失败: %s", exc)
             raise MarketDataUnavailable("天勤连接失败，请检查账号、密码和网络") from exc
 
     def fetch_bars(
@@ -359,6 +424,10 @@ class TqClient:
                             len(remote_bars),
                         )
                 return MarketBars(self._bars_from_rows(cached), "live", synced_at_ns)
+            except TqCredentialsInvalid:
+                if cached:
+                    return self._cached_result(symbol, duration_seconds, cached, sync_state)
+                raise
             except Exception as exc:
                 self._remote_retry_after_monotonic = monotonic() + 30
                 if cached:

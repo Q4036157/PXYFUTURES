@@ -1,6 +1,6 @@
 import asyncio
 
-from app.market.tq_client import MarketBars
+from app.market.tq_client import MarketBars, TqCredentialsInvalid
 from app.services.market_sync import (
     build_market_sync_jobs,
     run_market_sync_loop,
@@ -137,3 +137,42 @@ def test_sync_loop_publishes_rollover_without_fixed_sleep() -> None:
 
     assert received[0].changed_sources == {("CZCE.UR701", 60): 123}
     assert received[0].received_at_ns == 456
+
+
+def test_sync_loop_waits_for_credentials_change_without_retry_storm() -> None:
+    stop_event = asyncio.Event()
+
+    class Repository:
+        @staticmethod
+        def list_all_contracts() -> list[ContractConfig]:
+            return [ContractConfig(1, "CZCE.UR701", "UR701", [_period(180, 200)])]
+
+    class Client:
+        credential_revision = 0
+        calls = 0
+
+        def wait_for_bar_rollovers(self, *_args: object) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise TqCredentialsInvalid("天勤账号或密码错误，请重新输入")
+            stop_event.set()
+            return type("Rollover", (), {"changed_sources": {}, "received_at_ns": 0})()
+
+    client = Client()
+
+    async def run() -> None:
+        async def unlock() -> None:
+            await asyncio.sleep(0.02)
+            client.credential_revision += 1
+
+        unlock_task = asyncio.create_task(unlock())
+        await run_market_sync_loop(
+            client,  # type: ignore[arg-type]
+            Repository(),  # type: ignore[arg-type]
+            stop_event,
+        )
+        await unlock_task
+
+    asyncio.run(run())
+
+    assert client.calls == 2
