@@ -169,3 +169,55 @@ def test_save_persists_only_after_validation_and_resets_connection(
         ("save", "user", "secret"),
         "reset",
     ]
+
+
+def test_runtime_rejection_blocks_retries_until_credentials_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(
+        "app.market.tq_client.get_tq_credentials",
+        lambda: ("saved-user", "saved-password"),
+    )
+    attempts: list[str] = []
+
+    class Auth:
+        def __init__(self, _username: str, _password: str) -> None:
+            pass
+
+    class Api:
+        def __init__(self, *, auth: object) -> None:
+            self.auth = auth
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tqsdk",
+        SimpleNamespace(TqApi=Api, TqAuth=Auth),
+    )
+    client = TqClient()
+
+    def reject(_username: str, _password: str) -> None:
+        attempts.append("rejected")
+        raise TqCredentialsInvalid("天勤账号或密码错误，请重新输入")
+
+    monkeypatch.setattr(client, "validate_credentials", reject)
+    with pytest.raises(TqCredentialsInvalid):
+        client._get_api()
+    with pytest.raises(TqCredentialsInvalid):
+        client._get_api()
+
+    assert attempts == ["rejected"]
+    assert load_tq_auth_state().status == "invalid"
+
+    monkeypatch.setattr(client, "validate_credentials", lambda *_args: None)
+    blocked_revision = client.credential_revision
+    client.credentials_changed()
+
+    assert client.credential_revision == blocked_revision + 1
+    assert client._get_api() is not None
+    assert load_tq_auth_state().status == "valid"
