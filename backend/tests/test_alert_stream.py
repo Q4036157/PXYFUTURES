@@ -155,6 +155,69 @@ def test_websocket_rejects_missing_app_session() -> None:
     asyncio.run(run())
 
 
+def test_desktop_websocket_accepts_loopback_without_cookie(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "desktop_mode", True)
+    calls: list[tuple[str, frozenset[int]]] = []
+
+    def scanner(
+        _repository: object,
+        user_id: str,
+        durations: frozenset[int],
+    ) -> dict[str, object]:
+        calls.append((user_id, durations))
+        return {"signals": [], "requested": 1, "failed": 0}
+
+    async def run() -> None:
+        incoming: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        sent: list[dict[str, object]] = []
+        service = AlertStreamService(object(), scanner)  # type: ignore[arg-type]
+        app = SimpleNamespace(state=SimpleNamespace(alert_stream=service))
+
+        async def receive() -> dict[str, object]:
+            return await incoming.get()
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        websocket = WebSocket(
+            {
+                "type": "websocket",
+                "path": "/api/contracts/alerts/ws",
+                "headers": [],
+                "client": ("127.0.0.1", 12345),
+                "app": app,
+            },
+            receive=receive,  # type: ignore[arg-type]
+            send=send,  # type: ignore[arg-type]
+        )
+        await incoming.put({"type": "websocket.connect"})
+        task = asyncio.create_task(stream_alerts(websocket))
+
+        for _ in range(100):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+        assert sent[0]["type"] == "websocket.accept"
+
+        await incoming.put(
+            {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "subscribe", "durations": [180]}),
+            }
+        )
+        for _ in range(100):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+        assert calls == [("desktop-local-user", frozenset({180}))]
+
+        await incoming.put({"type": "websocket.disconnect", "code": 1000})
+        await asyncio.wait_for(task, timeout=1)
+        await service.close()
+
+    asyncio.run(run())
+
+
 def test_rollover_arriving_during_scan_is_flushed_next() -> None:
     calls = 0
     first_scan_started = threading.Event()

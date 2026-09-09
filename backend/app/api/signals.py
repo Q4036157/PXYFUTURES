@@ -19,8 +19,8 @@ from app.market.boyi_kline import (
 from app.market.ma_engine import Bar, MovingAverageConfig, calculate_signal
 from app.market.tq_client import MarketBars, MarketDataUnavailable, TqClient
 from app.services import auth as auth_service
-from app.services.auth import current_user_id
 from app.services.alert_stream import AlertStreamService, AlertSubscriber
+from app.services.auth import current_user_id
 from app.services.repository import ConfigRepository, ContractConfig, PeriodConfig
 
 router = APIRouter(prefix="/api/contracts", tags=["均线信号"])
@@ -228,6 +228,12 @@ def scan_cached_alerts_for_user(
 
 
 def _websocket_user_id(websocket: WebSocket) -> str | None:
+    local_user_id = auth_service.desktop_user_id(
+        websocket.client.host if websocket.client else None,
+        websocket.headers.get("origin"),
+    )
+    if local_user_id:
+        return local_user_id
     token = websocket.cookies.get("pxy_futures_session", "").strip()
     return auth_service._decode_app_session(token) if token else None
 
@@ -240,7 +246,7 @@ async def _send_alert_messages(websocket: WebSocket, subscriber: AlertSubscriber
 
 @router.websocket("/alerts/ws")
 async def stream_alerts(websocket: WebSocket) -> None:
-    """通过主平台会话认证，向当前打开页面实时推送收K快照。"""
+    """通过主平台会话或本机客户版身份推送收K快照。"""
     user_id = _websocket_user_id(websocket)
     if user_id is None:
         await websocket.close(code=4401, reason="主平台登录已失效")

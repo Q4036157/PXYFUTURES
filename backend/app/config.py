@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     port: int = 3022
     log_level: str = "INFO"
     data_dir: Path = Path("./data")
+    desktop_mode: bool = Field(default=False, validation_alias="PXYFUTURES_DESKTOP")
     # 必须与 PXYLH 的 DAA_APP_SESSION_SECRET 相同。
     app_session_secret: str = ""
     tq_user_name: str = ""

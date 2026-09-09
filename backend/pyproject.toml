@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff==0.16.6", "pyinstaller>=6.0,<7"]
+desktop = ["pillow>=11.0,<13", "pystray>=0.19,<1"]
 
 [build-system]
 requires = ["hatchling"]

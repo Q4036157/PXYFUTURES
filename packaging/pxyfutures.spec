@@ -10,7 +10,15 @@ frontend_dist = root / "frontend" / "dist"
 datas = [(str(frontend_dist), "frontend/dist")]
 binaries = []
 hiddenimports = []
-for package in ("tqsdk", "tqsdk_ctpse", "tqsdk_sm", "shinny_structlog", "sgqlc"):
+for package in (
+    "tqsdk",
+    "tqsdk_ctpse",
+    "tqsdk_sm",
+    "shinny_structlog",
+    "sgqlc",
+    "pystray",
+    "PIL",
+):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -42,8 +50,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
-    disable_windowed_traceback=False,
+    console=False,
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

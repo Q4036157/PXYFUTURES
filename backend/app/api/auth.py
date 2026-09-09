@@ -13,5 +13,5 @@ router = APIRouter(prefix="/api/auth", tags=["认证"])
 async def status() -> dict[str, object]:
     return {
         "mode": auth.auth_mode(),
-        "configured": bool(settings.app_session_secret.strip()),
+        "configured": settings.desktop_mode or bool(settings.app_session_secret.strip()),
     }
