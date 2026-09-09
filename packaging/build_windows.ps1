@@ -25,10 +25,30 @@ try {
 Write-Host "[2/5] Building frontend..."
 Push-Location (Join-Path $Root "frontend")
 try {
-    & npm.cmd run build
+    & $env:ComSpec /d /s /c "npm.cmd run build -- --mode=desktop --base=/"
     if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
 } finally {
     Pop-Location
+}
+
+$FrontendDist = Join-Path $Root "frontend\dist"
+$DesktopIndex = Join-Path $FrontendDist "index.html"
+$IndexHtml = Get-Content $DesktopIndex -Raw
+$AssetMatches = [regex]::Matches($IndexHtml, '(?:src|href)="(/assets/[^\"]+)"')
+if ($AssetMatches.Count -eq 0) {
+    throw "Desktop frontend does not reference root /assets files"
+}
+foreach ($AssetMatch in $AssetMatches) {
+    $AssetPath = Join-Path $FrontendDist $AssetMatch.Groups[1].Value.TrimStart("/")
+    if (-not (Test-Path $AssetPath -PathType Leaf)) {
+        throw "Desktop frontend asset was not built: $AssetPath"
+    }
+}
+$HostedApiReference = Get-ChildItem (Join-Path $FrontendDist "assets") -Filter "*.js" |
+    Select-String -Pattern "/futures-app/api" -SimpleMatch |
+    Select-Object -First 1
+if ($null -ne $HostedApiReference) {
+    throw "Desktop frontend still references the hosted /futures-app/api path"
 }
 
 Write-Host "[3/5] Running backend tests..."
@@ -49,7 +69,18 @@ $Exe = Get-ChildItem $Release -Filter "*.exe" |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if (-not $Exe) { throw "Packaged EXE was not found in: $Release" }
-Compress-Archive -LiteralPath @($Exe.FullName, $Readme) -DestinationPath $Zip -CompressionLevel Optimal -Force
+$ZipCreated = $false
+for ($Attempt = 1; $Attempt -le 10; $Attempt++) {
+    try {
+        Compress-Archive -LiteralPath @($Exe.FullName, $Readme) -DestinationPath $Zip -CompressionLevel Optimal -Force
+        $ZipCreated = $true
+        break
+    } catch {
+        if ($Attempt -eq 10) { throw }
+        Start-Sleep -Seconds 1
+    }
+}
+if (-not $ZipCreated) { throw "Client ZIP was not created: $Zip" }
 
 Write-Host "[5/5] Build completed."
 Get-ChildItem $Release -File | Select-Object Name, Length, LastWriteTime

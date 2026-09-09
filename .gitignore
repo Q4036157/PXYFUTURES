@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!frontend/.env.desktop
 backend/.venv/
 backend/data/
 **/__pycache__/
