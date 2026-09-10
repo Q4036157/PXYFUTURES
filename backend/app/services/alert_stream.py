@@ -66,6 +66,14 @@ class AlertStreamService:
             subscriber.user_id,
             durations,
         )
+        logger.info(
+            "预警订阅已更新: user=%s periods=%s requested=%s signals=%s failed=%s",
+            subscriber.user_id,
+            ",".join(str(value) for value in sorted(durations)) or "none",
+            payload.get("requested", 0),
+            len(payload.get("signals", [])),
+            payload.get("failed", 0),
+        )
         self._offer(subscriber, self._message(payload, "initial", None))
 
     def offer_control(self, subscriber_id: str, event_type: str) -> None:

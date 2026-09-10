@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 _CHINA_TZ = timezone(timedelta(hours=8))
 _MAX_TQ_KLINE_BARS = 10_000
 _MAX_CACHED_BASE_BARS = 50_000
+_LIVE_KLINE_BARS = 10
 _CONNECTION_NOTICE_INTERVAL_SECONDS = 15 * 60
 
 
@@ -248,6 +249,8 @@ class TqClient:
         with self._lock:
             api = self._get_api()
             active_keys: list[tuple[str, int]] = []
+            initialized = 0
+            history_backfills = 0
             for job in jobs:
                 key = (job.symbol, job.duration_seconds)
                 active_keys.append(key)
@@ -255,13 +258,10 @@ class TqClient:
                     job.symbol,
                     job.duration_seconds,
                 )
-                # 历史已落库后只订阅足够覆盖缺口的短窗口。天勤会把不同
-                # data_length 当成不同序列；与页面增量请求保持同一宽度可避免
-                # 同一合约同时维护一长一短两套实时订阅。
-                data_length = min(
+                history_length = min(
                     _MAX_TQ_KLINE_BARS,
                     max(
-                        10,
+                        _LIVE_KLINE_BARS,
                         self._request_count(
                             job.duration_seconds,
                             job.count,
@@ -270,30 +270,60 @@ class TqClient:
                     ),
                 )
                 series = self._live_kline_series.get(key)
-                if series is not None and series.data_length >= data_length:
+                if series is not None and series.data_length == _LIVE_KLINE_BARS:
                     series.cache_count = max(series.cache_count, job.count)
                     continue
 
-                frame = api.get_kline_serial(
+                # 冷启动时先用长窗口一次性补齐均线历史，再明确切换到10根的
+                # 实时窗口。天勤会把不同 data_length 当成不同序列；页面增量
+                # 请求也使用10根，后台必须监听同一个短序列才能稳定收到收K。
+                history_frame = api.get_kline_serial(
                     to_tq_symbol(job.symbol),
                     duration_seconds=job.duration_seconds,
-                    data_length=data_length,
+                    data_length=history_length,
                 )
-                remote_bars = self._remote_bars(frame)
+                history_bars = self._remote_bars(history_frame)
                 synced_at_ns = time_ns()
-                if remote_bars:
+                if history_bars:
                     repository.save_kline_bars(
                         job.symbol,
                         job.duration_seconds,
-                        remote_bars,
-                        data_length,
+                        history_bars,
+                        history_length,
                         synced_at_ns,
                     )
+                live_frame = history_frame
+                live_bars = history_bars
+                if history_length != _LIVE_KLINE_BARS:
+                    live_frame = api.get_kline_serial(
+                        to_tq_symbol(job.symbol),
+                        duration_seconds=job.duration_seconds,
+                        data_length=_LIVE_KLINE_BARS,
+                    )
+                    live_bars = self._remote_bars(live_frame)
+                    if live_bars:
+                        repository.save_kline_bars(
+                            job.symbol,
+                            job.duration_seconds,
+                            live_bars,
+                            _LIVE_KLINE_BARS,
+                            synced_at_ns,
+                        )
+                    history_backfills += 1
                 self._live_kline_series[key] = _LiveKlineSeries(
-                    frame=frame,
-                    data_length=data_length,
+                    frame=live_frame,
+                    data_length=_LIVE_KLINE_BARS,
                     cache_count=job.count,
-                    latest_timestamp_ns=remote_bars[-1][0] if remote_bars else None,
+                    latest_timestamp_ns=live_bars[-1][0] if live_bars else None,
+                )
+                initialized += 1
+
+            if initialized:
+                logger.info(
+                    "实时行情短序列已就绪: 新增=%d 历史回填=%d 总数=%d",
+                    initialized,
+                    history_backfills,
+                    len(self._live_kline_series),
                 )
 
             received_at_ns = time_ns()

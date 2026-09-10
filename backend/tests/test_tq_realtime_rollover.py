@@ -91,7 +91,7 @@ def test_wait_update_emits_only_after_new_bar_timestamp() -> None:
     assert rollover.changed_sources == {("CZCE.UR701", 60): 300}
     assert repository.batch_writes == 1
     assert repository.saved[0][2] == [(100, 10.0), (200, 11.0)]
-    assert repository.saved[1][2] == [(100, 10.0), (200, 11.0), (300, 12.0)]
+    assert repository.saved[-1][2] == [(100, 10.0), (200, 11.0), (300, 12.0)]
 
 
 def test_wait_update_ignores_price_change_inside_same_bar() -> None:
@@ -157,3 +157,40 @@ def test_live_rollover_reuses_short_incremental_window_after_history_is_cached()
     assert requested_lengths == [10]
     assert rollover.changed_sources == {("CZCE.UR701", 60): 300}
     assert repository.saved[0][3] == 10
+
+
+def test_cold_start_backfills_history_then_listens_on_short_window() -> None:
+    history_frame = Frame([Row(100, 10.0), Row(200, 11.0)])
+    live_frame = Frame([Row(100, 10.0), Row(200, 11.0)])
+    requested_lengths: list[int] = []
+
+    class Api:
+        @staticmethod
+        def get_kline_serial(
+            _symbol: str,
+            *,
+            duration_seconds: int,
+            data_length: int,
+        ) -> Frame:
+            assert duration_seconds == 60
+            requested_lengths.append(data_length)
+            return live_frame if data_length == 10 else history_frame
+
+        @staticmethod
+        def wait_update(*_args: object, **_kwargs: object) -> bool:
+            live_frame.rows.append(Row(300, 12.0))
+            return True
+
+    client = TqClient()
+    client._api = Api()
+    repository = Repository()
+
+    rollover = client.wait_for_bar_rollovers(
+        [MarketSyncJob("CZCE.UR701", 60, 1503)],
+        repository,  # type: ignore[arg-type]
+        0.01,
+    )
+
+    assert requested_lengths == [1503, 10]
+    assert rollover.changed_sources == {("CZCE.UR701", 60): 300}
+    assert repository.saved[0][3] == 1503
