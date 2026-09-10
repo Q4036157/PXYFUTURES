@@ -3,8 +3,9 @@ import json
 import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 from jose import jwt
 
 from app.api.signals import stream_alerts
@@ -214,6 +215,45 @@ def test_desktop_websocket_accepts_loopback_without_cookie(monkeypatch) -> None:
         await incoming.put({"type": "websocket.disconnect", "code": 1000})
         await asyncio.wait_for(task, timeout=1)
         await service.close()
+
+    asyncio.run(run())
+
+
+def test_websocket_unregisters_when_sender_observes_closed_connection(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "desktop_mode", True)
+
+    async def run() -> None:
+        disconnect = asyncio.Event()
+        service = AlertStreamService(
+            object(),
+            lambda *_args: {"signals": [], "requested": 0, "failed": 0},
+        )  # type: ignore[arg-type]
+
+        class ClosedWebSocket:
+            app = SimpleNamespace(state=SimpleNamespace(alert_stream=service))
+
+            @staticmethod
+            async def accept() -> None:
+                return None
+
+            @staticmethod
+            async def send_json(_message: dict[str, object]) -> None:
+                disconnect.set()
+                raise RuntimeError("websocket already closed")
+
+            @staticmethod
+            async def receive_json() -> dict[str, object]:
+                await disconnect.wait()
+                raise WebSocketDisconnect(1000)
+
+            cookies: ClassVar[dict[str, str]] = {}
+            headers: ClassVar[dict[str, str]] = {}
+            client = SimpleNamespace(host="127.0.0.1")
+
+        await stream_alerts(ClosedWebSocket())  # type: ignore[arg-type]
+        assert not service._subscribers
 
     asyncio.run(run())
 

@@ -194,3 +194,54 @@ def test_cold_start_backfills_history_then_listens_on_short_window() -> None:
     assert requested_lengths == [1503, 10]
     assert rollover.changed_sources == {("CZCE.UR701", 60): 300}
     assert repository.saved[0][3] == 1503
+
+
+def test_credentials_change_rebuilds_live_series_on_new_api() -> None:
+    first_frame = Frame([Row(100, 10.0), Row(200, 11.0)])
+    second_frame = Frame([Row(100, 10.0), Row(200, 11.0)])
+
+    class FirstApi:
+        closed = False
+
+        @staticmethod
+        def get_kline_serial(*_args: object, **_kwargs: object) -> Frame:
+            return first_frame
+
+        @staticmethod
+        def wait_update(*_args: object, **_kwargs: object) -> bool:
+            return False
+
+        @classmethod
+        def close(cls) -> None:
+            cls.closed = True
+
+    class SecondApi:
+        requested = 0
+
+        @classmethod
+        def get_kline_serial(cls, *_args: object, **_kwargs: object) -> Frame:
+            cls.requested += 1
+            return second_frame
+
+        @staticmethod
+        def wait_update(*_args: object, **_kwargs: object) -> bool:
+            second_frame.rows.append(Row(300, 12.0))
+            return True
+
+    client = TqClient()
+    client._api = FirstApi()
+    repository = Repository()
+    job = MarketSyncJob("CZCE.UR701", 60, 10)
+    client.wait_for_bar_rollovers([job], repository, 0.01)  # type: ignore[arg-type]
+
+    client.credentials_changed()
+    client._api = SecondApi()
+    rollover = client.wait_for_bar_rollovers(
+        [job],
+        repository,  # type: ignore[arg-type]
+        0.01,
+    )
+
+    assert FirstApi.closed
+    assert SecondApi.requested == 1
+    assert rollover.changed_sources == {("CZCE.UR701", 60): 300}

@@ -591,3 +591,6 @@ class TqClient:
                     logger.warning("关闭天勤连接失败", exc_info=True)
                 finally:
                     self._api = None
+            # K线 DataFrame 绑定创建它的 TqApi。连接关闭或凭据切换后继续
+            # 复用这些对象不会再收到行情更新，必须让新连接重新订阅。
+            self._live_kline_series.clear()

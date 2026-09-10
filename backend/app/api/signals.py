@@ -281,7 +281,7 @@ async def stream_alerts(websocket: WebSocket) -> None:
         sender.cancel()
         try:
             await sender
-        except (asyncio.CancelledError, WebSocketDisconnect):
+        except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
             pass
         await service.unregister(subscriber.id)
 
