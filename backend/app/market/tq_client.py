@@ -251,7 +251,24 @@ class TqClient:
             for job in jobs:
                 key = (job.symbol, job.duration_seconds)
                 active_keys.append(key)
-                data_length = min(_MAX_TQ_KLINE_BARS, max(10, job.count))
+                sync_state = repository.get_kline_sync_state(
+                    job.symbol,
+                    job.duration_seconds,
+                )
+                # 历史已落库后只订阅足够覆盖缺口的短窗口。天勤会把不同
+                # data_length 当成不同序列；与页面增量请求保持同一宽度可避免
+                # 同一合约同时维护一长一短两套实时订阅。
+                data_length = min(
+                    _MAX_TQ_KLINE_BARS,
+                    max(
+                        10,
+                        self._request_count(
+                            job.duration_seconds,
+                            job.count,
+                            sync_state,
+                        ),
+                    ),
+                )
                 series = self._live_kline_series.get(key)
                 if series is not None and series.data_length >= data_length:
                     series.cache_count = max(series.cache_count, job.count)
@@ -269,7 +286,7 @@ class TqClient:
                         job.symbol,
                         job.duration_seconds,
                         remote_bars,
-                        job.count,
+                        data_length,
                         synced_at_ns,
                     )
                 self._live_kline_series[key] = _LiveKlineSeries(

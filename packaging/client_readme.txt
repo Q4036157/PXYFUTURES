@@ -1,6 +1,8 @@
 智能期货客户版使用说明
 ======================
 
+版本：2026.09.10.1
+
 一、运行环境
 
 - 支持 Windows 10/11 64 位系统。
@@ -41,3 +43,4 @@
   %LOCALAPPDATA%\PXYFUTURES\data\logs
 - 最近一次脱敏认证状态位于：
   %LOCALAPPDATA%\PXYFUTURES\data\user_data\tq_auth_status.json
+- 健康接口和启动日志会显示版本号；排查时请确认版本为 2026.09.10.1。

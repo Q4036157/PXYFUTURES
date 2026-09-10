@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from time import time_ns
 
 from app.market.tq_client import TqClient
 from app.services.market_sync import MarketSyncJob
+from app.services.repository import KlineSyncState
 
 
 @dataclass
@@ -26,6 +28,14 @@ class Repository:
     def __init__(self) -> None:
         self.saved: list[tuple[str, int, list[tuple[int, float]], int, int]] = []
         self.batch_writes = 0
+        self.sync_state: KlineSyncState | None = None
+
+    def get_kline_sync_state(
+        self,
+        _symbol: str,
+        _duration_seconds: int,
+    ) -> KlineSyncState | None:
+        return self.sync_state
 
     def save_kline_bars(
         self,
@@ -107,3 +117,43 @@ def test_wait_update_ignores_price_change_inside_same_bar() -> None:
     )
 
     assert rollover.changed_sources == {}
+
+
+def test_live_rollover_reuses_short_incremental_window_after_history_is_cached() -> None:
+    frame = Frame([Row(100, 10.0), Row(200, 11.0)])
+    requested_lengths: list[int] = []
+
+    class Api:
+        @staticmethod
+        def get_kline_serial(
+            _symbol: str,
+            *,
+            duration_seconds: int,
+            data_length: int,
+        ) -> Frame:
+            assert duration_seconds == 60
+            requested_lengths.append(data_length)
+            return frame
+
+        @staticmethod
+        def wait_update(*_args: object, **_kwargs: object) -> bool:
+            frame.rows.append(Row(300, 12.0))
+            return True
+
+    client = TqClient()
+    client._api = Api()
+    repository = Repository()
+    repository.sync_state = KlineSyncState(
+        max_requested_bars=1503,
+        last_synced_at_ns=time_ns(),
+    )
+
+    rollover = client.wait_for_bar_rollovers(
+        [MarketSyncJob("CZCE.UR701", 60, 1503)],
+        repository,  # type: ignore[arg-type]
+        0.01,
+    )
+
+    assert requested_lengths == [10]
+    assert rollover.changed_sources == {("CZCE.UR701", 60): 300}
+    assert repository.saved[0][3] == 10

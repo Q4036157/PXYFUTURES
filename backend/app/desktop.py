@@ -16,6 +16,8 @@ import webbrowser
 from pathlib import Path
 from typing import Any, TextIO
 
+from app.version import APP_VERSION
+
 _DEFAULT_PORT = 31220
 _LAST_PORT = 31229
 _APP_DATA_FOLDER = "PXYFUTURES"
@@ -87,13 +89,19 @@ def _port_candidates() -> tuple[int, ...]:
     return (port,)
 
 
-def _health(port: int) -> bool:
+def _health_info(port: int) -> dict[str, object] | None:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.75) as response:
             payload = json.loads(response.read().decode("utf-8"))
-            return payload.get("status") == "ok" and payload.get("service") == "pxyfutures"
+            if payload.get("status") == "ok" and payload.get("service") == "pxyfutures":
+                return payload
+            return None
     except (OSError, ValueError, urllib.error.URLError):
-        return False
+        return None
+
+
+def _health(port: int) -> bool:
+    return _health_info(port) is not None
 
 
 def _port_available(port: int) -> bool:
@@ -105,8 +113,12 @@ def _port_available(port: int) -> bool:
     return True
 
 
-def _find_existing_instance(ports: tuple[int, ...]) -> int | None:
-    return next((port for port in ports if _health(port)), None)
+def _find_existing_instance(ports: tuple[int, ...]) -> tuple[int, str] | None:
+    for port in ports:
+        payload = _health_info(port)
+        if payload is not None:
+            return port, str(payload.get("version", ""))
+    return None
 
 
 def _find_available_port(ports: tuple[int, ...]) -> int:
@@ -181,13 +193,21 @@ def main() -> int:
 
     print("=" * 64)
     print("智能期货客户版正在启动")
+    print(f"软件版本：{APP_VERSION}")
     print(f"本地数据：{data_dir}")
     print("=" * 64)
 
     try:
         ports = _port_candidates()
-        existing_port = _find_existing_instance(ports)
-        if existing_port is not None:
+        existing = _find_existing_instance(ports)
+        if existing is not None:
+            existing_port, existing_version = existing
+            if existing_version != APP_VERSION:
+                version_text = existing_version or "旧版（无版本号）"
+                raise RuntimeError(
+                    f"检测到正在运行的智能期货 {version_text}。"
+                    "请先在系统托盘选择“退出软件”，再双击当前新版。"
+                )
             print(f"智能期货已经运行，正在打开：http://127.0.0.1:{existing_port}/")
             _open_browser(existing_port)
             return 0

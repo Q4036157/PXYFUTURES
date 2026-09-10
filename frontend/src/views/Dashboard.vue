@@ -83,6 +83,7 @@ const seenAlertEvents = new Set<string>()
 const soundTimers = new Set<number>()
 const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 const ALERT_FRESHNESS_MS = 3 * 60 * 1_000
+const ALERT_SAFETY_SCAN_MS = 5_000
 let alertAudio: HTMLAudioElement | null = null
 let alertRescanPending = false
 let alertSocket: WebSocket | null = null
@@ -145,7 +146,7 @@ const alertStatusText = computed(() => {
   if (alertFailedCount.value) {
     return `当前匹配 ${matchingAlertSignals.value.length} 条，${alertFailedCount.value} 条等待行情缓存`
   }
-  const channel = alertStreamConnected.value ? '实时推送' : '连接恢复中'
+  const channel = alertStreamConnected.value ? '实时推送 · 5秒校验' : '连接恢复中 · 5秒校验'
   return `当前匹配 ${matchingAlertSignals.value.length} 条 · ${channel}`
 })
 
@@ -767,8 +768,8 @@ onMounted(async () => {
     await loadContracts()
     timer = window.setInterval(() => void refreshSignals(), 3_000)
     alertTimer = window.setInterval(
-      () => void refreshAlertSignals(!alertStreamConnected.value),
-      30_000,
+      () => void refreshAlertSignals(true),
+      ALERT_SAFETY_SCAN_MS,
     )
     connectAlertStream()
   } catch (error: any) {

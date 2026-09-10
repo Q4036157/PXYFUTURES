@@ -19,6 +19,7 @@ from app.market.tq_client import TqClient
 from app.services.alert_stream import AlertStreamService
 from app.services.market_sync import run_market_sync_loop
 from app.services.repository import ConfigRepository
+from app.version import APP_VERSION
 
 settings.log_dir.mkdir(parents=True, exist_ok=True)
 _log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -53,7 +54,11 @@ async def lifespan(app: FastAPI):
         name="market-data-sync",
     )
     from app.services import auth as auth_service
-    logger.info("智能期货启动，认证模式：%s", auth_service.auth_mode())
+    logger.info(
+        "智能期货启动，版本：%s，认证模式：%s",
+        APP_VERSION,
+        auth_service.auth_mode(),
+    )
     try:
         yield
     finally:
@@ -63,7 +68,7 @@ async def lifespan(app: FastAPI):
         app.state.tq_client.close()
 
 
-app = FastAPI(title="貔貅元智能期货", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="貔貅元智能期货", version=APP_VERSION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,7 +84,7 @@ app.include_router(settings_api.router)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "pxyfutures"}
+    return {"status": "ok", "service": "pxyfutures", "version": APP_VERSION}
 
 
 # 冻结版从 PyInstaller 解压目录读取资源；开发版仍读取项目中的构建产物。

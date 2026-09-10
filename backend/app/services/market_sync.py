@@ -165,6 +165,10 @@ async def run_market_sync_loop(
                 pass
             continue
         if event.changed_sources and on_rollover is not None:
+            logger.info(
+                "后台行情检测到收K: 基础序列=%d",
+                len(event.changed_sources),
+            )
             await on_rollover(
                 MarketSyncEvent(
                     changed_sources=event.changed_sources,
