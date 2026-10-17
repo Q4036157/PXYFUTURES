@@ -38,6 +38,16 @@ class ContractConfig:
     symbol: str
     name: str
     periods: list[PeriodConfig]
+    group_id: int | None = None
+    sort_order: int = 0
+
+
+@dataclass(frozen=True)
+class ContractGroup:
+    id: int
+    name: str
+    sort_order: int
+    contracts: list[ContractConfig]
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,13 @@ class ConfigRepository:
                     symbol TEXT NOT NULL,
                     name TEXT NOT NULL DEFAULT '',
                     UNIQUE(user_id, symbol)
+                );
+                CREATE TABLE IF NOT EXISTS contract_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(user_id, name)
                 );
                 CREATE TABLE IF NOT EXISTS period_configs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,34 +120,159 @@ class ConfigRepository:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(period_configs)")}
             if "note" not in columns:
                 conn.execute("ALTER TABLE period_configs ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+            contract_columns = {row["name"] for row in conn.execute("PRAGMA table_info(contracts)")}
+            if "group_id" not in contract_columns:
+                conn.execute("ALTER TABLE contracts ADD COLUMN group_id INTEGER REFERENCES contract_groups(id)")
+            if "sort_order" not in contract_columns:
+                conn.execute("ALTER TABLE contracts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 
     def list_contracts(self, user_id: str) -> list[ContractConfig]:
         with self._connect() as conn:
+            self._ensure_user_groups(conn, user_id)
             contracts = conn.execute(
-                "SELECT id, symbol, name FROM contracts WHERE user_id = ? ORDER BY symbol", (user_id,)
+                """SELECT id, symbol, name, group_id, sort_order
+                   FROM contracts WHERE user_id = ?
+                   ORDER BY group_id, sort_order, symbol, id""",
+                (user_id,),
             ).fetchall()
             return [self._contract_from_row(conn, row) for row in contracts]
+
+    def list_contract_groups(self, user_id: str) -> list[ContractGroup]:
+        with self._connect() as conn:
+            groups = self._ensure_user_groups(conn, user_id)
+            return [
+                ContractGroup(
+                    id=int(group["id"]),
+                    name=str(group["name"]),
+                    sort_order=int(group["sort_order"]),
+                    contracts=[
+                        self._contract_from_row(conn, row)
+                        for row in conn.execute(
+                            """SELECT id, symbol, name, group_id, sort_order
+                               FROM contracts WHERE user_id = ? AND group_id = ?
+                               ORDER BY sort_order, symbol, id""",
+                            (user_id, group["id"]),
+                        ).fetchall()
+                    ],
+                )
+                for group in groups
+            ]
+
+    def create_group(self, user_id: str, name: str) -> ContractGroup:
+        with self._connect() as conn:
+            self._ensure_user_groups(conn, user_id)
+            next_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM contract_groups WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0]
+            cursor = conn.execute(
+                "INSERT INTO contract_groups(user_id, name, sort_order) VALUES (?, ?, ?)",
+                (user_id, name.strip(), next_order),
+            )
+            return ContractGroup(int(cursor.lastrowid), name.strip(), int(next_order), [])
+
+    def rename_group(self, user_id: str, group_id: int, name: str) -> ContractGroup | None:
+        with self._connect() as conn:
+            updated = conn.execute(
+                "UPDATE contract_groups SET name = ? WHERE id = ? AND user_id = ?",
+                (name.strip(), group_id, user_id),
+            )
+            if updated.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT id, name, sort_order FROM contract_groups WHERE id = ? AND user_id = ?",
+                (group_id, user_id),
+            ).fetchone()
+            contracts = [
+                self._contract_from_row(conn, contract)
+                for contract in conn.execute(
+                    """SELECT id, symbol, name, group_id, sort_order
+                       FROM contracts WHERE user_id = ? AND group_id = ?
+                       ORDER BY sort_order, symbol, id""",
+                    (user_id, group_id),
+                ).fetchall()
+            ]
+            return ContractGroup(int(row["id"]), str(row["name"]), int(row["sort_order"]), contracts)
+
+    def move_contract(self, user_id: str, contract_id: int, group_id: int) -> ContractConfig | None:
+        with self._connect() as conn:
+            self._ensure_user_groups(conn, user_id)
+            if not conn.execute(
+                "SELECT 1 FROM contract_groups WHERE id = ? AND user_id = ?",
+                (group_id, user_id),
+            ).fetchone():
+                return None
+            next_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM contracts WHERE user_id = ? AND group_id = ?",
+                (user_id, group_id),
+            ).fetchone()[0]
+            updated = conn.execute(
+                "UPDATE contracts SET group_id = ?, sort_order = ? WHERE id = ? AND user_id = ?",
+                (group_id, next_order, contract_id, user_id),
+            )
+            if updated.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT id, symbol, name, group_id, sort_order FROM contracts WHERE id = ? AND user_id = ?",
+                (contract_id, user_id),
+            ).fetchone()
+            return self._contract_from_row(conn, row)
+
+    def reorder_contracts(self, user_id: str, group_id: int, contract_ids: Sequence[int]) -> bool:
+        with self._connect() as conn:
+            self._ensure_user_groups(conn, user_id)
+            existing = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM contracts WHERE user_id = ? AND group_id = ? ORDER BY sort_order, id",
+                    (user_id, group_id),
+                ).fetchall()
+            ]
+            requested = [int(contract_id) for contract_id in contract_ids]
+            if len(requested) != len(set(requested)) or set(requested) != set(existing):
+                return False
+            conn.executemany(
+                "UPDATE contracts SET sort_order = ? WHERE id = ? AND user_id = ? AND group_id = ?",
+                [(index, contract_id, user_id, group_id) for index, contract_id in enumerate(requested)],
+            )
+            return True
 
     def list_all_contracts(self) -> list[ContractConfig]:
         """供后台行情同步读取全部用户已添加的合约。"""
         with self._connect() as conn:
             contracts = conn.execute(
-                "SELECT id, symbol, name FROM contracts ORDER BY symbol, id"
+                "SELECT id, symbol, name, group_id, sort_order FROM contracts ORDER BY symbol, id"
             ).fetchall()
             return [self._contract_from_row(conn, row) for row in contracts]
 
     def get_contract(self, user_id: str, contract_id: int) -> ContractConfig | None:
         with self._connect() as conn:
+            self._ensure_user_groups(conn, user_id)
             row = conn.execute(
-                "SELECT id, symbol, name FROM contracts WHERE id = ? AND user_id = ?", (contract_id, user_id)
+                """SELECT id, symbol, name, group_id, sort_order
+                   FROM contracts WHERE id = ? AND user_id = ?""",
+                (contract_id, user_id),
             ).fetchone()
             return self._contract_from_row(conn, row) if row else None
 
-    def create_contract(self, user_id: str, symbol: str, name: str) -> ContractConfig:
+    def create_contract(
+        self, user_id: str, symbol: str, name: str, group_id: int | None = None
+    ) -> ContractConfig:
         with self._connect() as conn:
+            groups = self._ensure_user_groups(conn, user_id)
+            target_group_id = group_id or int(groups[0]["id"])
+            if not conn.execute(
+                "SELECT 1 FROM contract_groups WHERE id = ? AND user_id = ?",
+                (target_group_id, user_id),
+            ).fetchone():
+                raise ValueError("分组不存在")
+            next_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM contracts WHERE user_id = ? AND group_id = ?",
+                (user_id, target_group_id),
+            ).fetchone()[0]
             cursor = conn.execute(
-                "INSERT INTO contracts(user_id, symbol, name) VALUES (?, ?, ?)",
-                (user_id, symbol.strip(), name.strip()),
+                "INSERT INTO contracts(user_id, symbol, name, group_id, sort_order) VALUES (?, ?, ?, ?, ?)",
+                (user_id, symbol.strip(), name.strip(), target_group_id, next_order),
             )
             conn.executemany(
                 """INSERT INTO period_configs(contract_id,label,duration_seconds,m4,m3,m2,m1,note)
@@ -149,7 +291,10 @@ class ConfigRepository:
                     for period in DEFAULT_PERIOD_CONFIGS
                 ],
             )
-            row = conn.execute("SELECT id, symbol, name FROM contracts WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            row = conn.execute(
+                "SELECT id, symbol, name, group_id, sort_order FROM contracts WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
             return self._contract_from_row(conn, row)
 
     def update_contract(
@@ -168,7 +313,7 @@ class ConfigRepository:
             if updated.rowcount == 0:
                 return None
             row = conn.execute(
-                "SELECT id, symbol, name FROM contracts WHERE id = ? AND user_id = ?",
+                "SELECT id, symbol, name, group_id, sort_order FROM contracts WHERE id = ? AND user_id = ?",
                 (contract_id, user_id),
             ).fetchone()
             return self._contract_from_row(conn, row)
@@ -299,10 +444,47 @@ class ConfigRepository:
         periods = conn.execute(
             "SELECT * FROM period_configs WHERE contract_id = ? ORDER BY duration_seconds DESC", (row["id"],)
         ).fetchall()
+        columns = row.keys()
         return ContractConfig(
             id=row["id"], symbol=row["symbol"], name=row["name"],
             periods=[self._period_from_row(period) for period in periods],
+            group_id=row["group_id"] if "group_id" in columns else None,
+            sort_order=int(row["sort_order"]) if "sort_order" in columns else 0,
         )
+
+    @staticmethod
+    def _ensure_user_groups(conn: sqlite3.Connection, user_id: str) -> list[sqlite3.Row]:
+        groups = conn.execute(
+            "SELECT id, name, sort_order FROM contract_groups WHERE user_id = ? ORDER BY sort_order, id",
+            (user_id,),
+        ).fetchall()
+        if not groups:
+            conn.executemany(
+                "INSERT INTO contract_groups(user_id, name, sort_order) VALUES (?, ?, ?)",
+                [(user_id, f"自定义{index}", index - 1) for index in range(1, 4)],
+            )
+            groups = conn.execute(
+                "SELECT id, name, sort_order FROM contract_groups WHERE user_id = ? ORDER BY sort_order, id",
+                (user_id,),
+            ).fetchall()
+        first_group_id = int(groups[0]["id"])
+        unassigned = conn.execute(
+            "SELECT id FROM contracts WHERE user_id = ? AND group_id IS NULL ORDER BY symbol, id",
+            (user_id,),
+        ).fetchall()
+        if unassigned:
+            current_max = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM contracts WHERE user_id = ? AND group_id = ?",
+                (user_id, first_group_id),
+            ).fetchone()[0]
+            conn.executemany(
+                "UPDATE contracts SET group_id = ?, sort_order = ? WHERE id = ? AND user_id = ?",
+                [
+                    (first_group_id, int(current_max) + index + 1, int(row["id"]), user_id)
+                    for index, row in enumerate(unassigned)
+                ],
+            )
+        return groups
 
     @staticmethod
     def _period_from_row(row: sqlite3.Row) -> PeriodConfig:

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.market.contract_catalog import normalize_contract_code
 from app.market.tq_client import ContractUnavailable, MarketDataUnavailable, TqClient
 from app.services.auth import current_user_id
-from app.services.repository import ConfigRepository, ContractConfig, PeriodConfig
+from app.services.repository import ConfigRepository, ContractConfig, ContractGroup, PeriodConfig
 
 router = APIRouter(prefix="/api/contracts", tags=["合约配置"])
 
@@ -18,6 +18,7 @@ class ContractCreate(BaseModel):
     exchange: str | None = Field(default=None, min_length=2, max_length=10)
     code: str = Field(min_length=1, max_length=30)
     name: str = Field(default="", max_length=50)
+    group_id: int | None = Field(default=None, gt=0)
 
     @field_validator("exchange", "code")
     @classmethod
@@ -46,6 +47,14 @@ class PeriodNoteBody(BaseModel):
     note: str = Field(default="", max_length=500)
 
 
+class GroupBody(BaseModel):
+    name: str = Field(min_length=1, max_length=30)
+
+
+class ContractOrderBody(BaseModel):
+    contract_ids: list[int] = Field(default_factory=list)
+
+
 def _repo(request: Request) -> ConfigRepository:
     return request.app.state.config_repository
 
@@ -58,13 +67,55 @@ def _serialize(contract: ContractConfig) -> dict[str, object]:
         "exchange": exchange,
         "code": code or contract.symbol,
         "name": contract.name,
+        "group_id": contract.group_id,
+        "sort_order": contract.sort_order,
         "periods": [period.__dict__ for period in contract.periods],
+    }
+
+
+def _serialize_group(group: ContractGroup) -> dict[str, object]:
+    return {
+        "id": group.id,
+        "name": group.name,
+        "sort_order": group.sort_order,
+        "contracts": [_serialize(contract) for contract in group.contracts],
     }
 
 
 @router.get("")
 async def list_contracts(request: Request, user_id: str = Depends(current_user_id)) -> list[dict[str, object]]:
     return [_serialize(contract) for contract in _repo(request).list_contracts(user_id)]
+
+
+@router.get("/groups")
+async def list_contract_groups(request: Request, user_id: str = Depends(current_user_id)) -> list[dict[str, object]]:
+    return [_serialize_group(group) for group in _repo(request).list_contract_groups(user_id)]
+
+
+@router.post("/groups", status_code=201)
+async def create_contract_group(
+    body: GroupBody, request: Request, user_id: str = Depends(current_user_id)
+) -> dict[str, object]:
+    try:
+        return _serialize_group(_repo(request).create_group(user_id, body.name))
+    except Exception as exc:  # sqlite unique constraint
+        raise HTTPException(status_code=409, detail="该分组名称已存在") from exc
+
+
+@router.put("/groups/{group_id}")
+async def rename_contract_group(
+    group_id: int,
+    body: GroupBody,
+    request: Request,
+    user_id: str = Depends(current_user_id),
+) -> dict[str, object]:
+    try:
+        group = _repo(request).rename_group(user_id, group_id, body.name)
+    except Exception as exc:  # sqlite unique constraint
+        raise HTTPException(status_code=409, detail="该分组名称已存在") from exc
+    if group is None:
+        raise HTTPException(status_code=404, detail="分组不存在")
+    return _serialize_group(group)
 
 
 @router.get("/suggestions")
@@ -119,10 +170,42 @@ async def create_contract(
             user_id,
             symbol,
             body.name or body.code.strip().upper(),
+            body.group_id,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # sqlite unique constraint
         raise HTTPException(status_code=409, detail="该合约已添加") from exc
     return _serialize(contract)
+
+
+class ContractGroupBody(BaseModel):
+    group_id: int = Field(gt=0)
+
+
+@router.put("/{contract_id}/group")
+async def move_contract_group(
+    contract_id: int,
+    body: ContractGroupBody,
+    request: Request,
+    user_id: str = Depends(current_user_id),
+) -> dict[str, object]:
+    moved = _repo(request).move_contract(user_id, contract_id, body.group_id)
+    if moved is None:
+        raise HTTPException(status_code=404, detail="合约或分组不存在")
+    return _serialize(moved)
+
+
+@router.put("/groups/{group_id}/order")
+async def reorder_contract_group(
+    group_id: int,
+    body: ContractOrderBody,
+    request: Request,
+    user_id: str = Depends(current_user_id),
+) -> dict[str, bool]:
+    if not _repo(request).reorder_contracts(user_id, group_id, body.contract_ids):
+        raise HTTPException(status_code=400, detail="排序中的合约必须完整属于当前分组")
+    return {"ok": True}
 
 
 @router.put("/{contract_id}")

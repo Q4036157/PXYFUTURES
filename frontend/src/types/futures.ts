@@ -16,6 +16,15 @@ export interface ContractConfig {
   code: string
   name: string
   periods: PeriodConfig[]
+  group_id: number | null
+  sort_order: number
+}
+
+export interface ContractGroup {
+  id: number
+  name: string
+  sort_order: number
+  contracts: ContractConfig[]
 }
 
 export interface SignalSnapshot {

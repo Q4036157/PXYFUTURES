@@ -10,6 +10,7 @@ import type {
   AlertSignalSnapshot,
   AlertStreamSnapshot,
   ContractConfig,
+  ContractGroup,
   ContractSignals,
   PeriodConfig,
   SignalSnapshot,
@@ -19,7 +20,13 @@ type AlertCondition =
   | '多多金叉' | '多空金叉' | '空多金叉' | '空空金叉'
   | '多多死叉' | '多空死叉' | '空多死叉' | '空空死叉'
 
+type AlertState = '上涨' | '回调' | '多震荡' | '下跌' | '反弹' | '空震荡'
+type PanelKey = 'groups' | 'setup' | 'signals' | 'alerts'
+type PanelSize = { width?: number; height?: number }
+
 const contracts = ref<ContractConfig[]>([])
+const contractGroups = ref<ContractGroup[]>([])
+const activeGroupId = ref<number | null>(null)
 const selectedId = ref<number | null>(null)
 const signals = ref<SignalSnapshot[]>([])
 const periodNotes = ref<Record<number, string>>({})
@@ -35,7 +42,7 @@ const periodVisible = ref(false)
 const credentialsVisible = ref(false)
 const editPeriod = ref<PeriodConfig | null>(null)
 const editingContract = ref<ContractConfig | null>(null)
-const form = ref({ exchange: '', code: '', name: '' })
+const form = ref({ exchange: '', code: '', name: '', group_id: null as number | null })
 const contractEditForm = ref({ exchange: '', code: '', name: '' })
 const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 })
 const credentials = ref({ username: '', password: '' })
@@ -65,6 +72,7 @@ const pendingNoteValues = new Map<string, string>()
 const noteSaveTimers = new Map<string, number>()
 const selectedAlertDurations = ref<number[]>([])
 const selectedAlertConditions = ref<AlertCondition[]>([])
+const selectedAlertStates = ref<AlertState[]>([])
 const alertSignals = ref<AlertSignalSnapshot[]>([])
 const alertScanning = ref(false)
 const alertScanError = ref('')
@@ -94,6 +102,34 @@ const platformReturnVisible = window.location.pathname === '/futures-app'
   || window.location.pathname.startsWith('/futures-app/')
   || window.self !== window.top
 
+const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡']
+const panelLayoutKey = 'pxy-futures-panel-layout-v1'
+const collapsedPanels = ref<Record<PanelKey, boolean>>({
+  groups: false,
+  setup: false,
+  signals: false,
+  alerts: false,
+})
+const panelSizes = ref<Record<PanelKey, PanelSize>>({
+  groups: {},
+  setup: {},
+  signals: {},
+  alerts: {},
+})
+const groupsPanelRef = ref<HTMLElement | null>(null)
+const setupPanelRef = ref<HTMLElement | null>(null)
+const signalsPanelRef = ref<HTMLElement | null>(null)
+const alertsPanelRef = ref<HTMLElement | null>(null)
+const panelRefs = {
+  groups: groupsPanelRef,
+  setup: setupPanelRef,
+  signals: signalsPanelRef,
+  alerts: alertsPanelRef,
+}
+let panelResizeObserver: ResizeObserver | null = null
+const draggedContractId = ref<number | null>(null)
+const draggedSourceGroupId = ref<number | null>(null)
+
 const commonPeriods = [
   { label: '日线', durationSeconds: 86400 },
   { label: '4小时', durationSeconds: 14400 },
@@ -122,10 +158,14 @@ const contractEditRecognition = computed(() => recognizeContract(contractEditFor
 const matchingAlertSignals = computed(() => {
   const durations = new Set(selectedAlertDurations.value)
   const conditions = new Set(selectedAlertConditions.value)
+  const states = new Set(selectedAlertStates.value)
   return alertSignals.value
     .filter((signal) => {
       const condition = alertCondition(signal)
-      return durations.has(signal.period.duration_seconds) && condition !== null && conditions.has(condition)
+      const state = alertState(signal)
+      const matchesCondition = !conditions.size || (condition !== null && conditions.has(condition))
+      const matchesState = !states.size || (state !== null && states.has(state))
+      return durations.has(signal.period.duration_seconds) && matchesCondition && matchesState
     })
     .sort((left, right) => {
       const durationOrder = commonPeriods.findIndex(
@@ -138,8 +178,8 @@ const matchingAlertSignals = computed(() => {
 })
 
 const alertStatusText = computed(() => {
-  if (!selectedAlertDurations.value.length || !selectedAlertConditions.value.length) {
-    return '请选择周期和条件开始监测'
+  if (!selectedAlertDurations.value.length) {
+    return '请选择周期开始监测'
   }
   if (alertScanning.value) return '正在扫描自选合约'
   if (alertScanError.value) return alertScanError.value
@@ -153,6 +193,10 @@ const alertStatusText = computed(() => {
 function alertCondition(signal: AlertSignalSnapshot): AlertCondition | null {
   if (!signal.cross_type) return null
   return `${signal.trend.m4}${signal.trend.m3}${signal.cross_type}` as AlertCondition
+}
+
+function alertState(signal: AlertSignalSnapshot): AlertState | null {
+  return alertStateOptions.includes(signal.label as AlertState) ? signal.label as AlertState : null
 }
 
 function alertText(signal: AlertSignalSnapshot): string {
@@ -217,6 +261,15 @@ function toggleAlertCondition(condition: AlertCondition): void {
   if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
+function toggleAlertState(state: AlertState): void {
+  enableBrowserAlerts()
+  selectedAlertStates.value = selectedAlertStates.value.includes(state)
+    ? selectedAlertStates.value.filter((value) => value !== state)
+    : [...selectedAlertStates.value, state]
+  syncAlertSubscription()
+  if (!alertStreamConnected.value) void refreshAlertSignals()
+}
+
 function playAlertSound(): void {
   const audio = getAlertAudio()
   for (let index = 0; index < 5; index += 1) {
@@ -274,9 +327,12 @@ function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): vo
   if (!allowNotification) return
 
   const selectedConditions = new Set(selectedAlertConditions.value)
+  const selectedStates = new Set(selectedAlertStates.value)
   const newSignals = data.signals.filter((signal) => {
     const condition = alertCondition(signal)
-    if (!condition || !selectedConditions.has(condition)) return false
+    const state = alertState(signal)
+    if (selectedConditions.size && (!condition || !selectedConditions.has(condition))) return false
+    if (selectedStates.size && (!state || !selectedStates.has(state))) return false
     if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
     if (!isFreshAlertSignal(signal)) return false
     return !seenAlertEvents.has(alertEventKey(signal))
@@ -293,7 +349,7 @@ async function refreshAlertSignals(allowNotification = true): Promise<void> {
     alertRescanPending = true
     return
   }
-  if (!selectedAlertDurations.value.length || !selectedAlertConditions.value.length) {
+  if (!selectedAlertDurations.value.length) {
     alertSignals.value = []
     alertFailedCount.value = 0
     alertScanError.value = ''
@@ -319,7 +375,6 @@ async function refreshAlertSignals(allowNotification = true): Promise<void> {
 }
 
 function monitoredAlertDurations(): number[] {
-  if (!selectedAlertConditions.value.length) return []
   return selectedAlertDurations.value
 }
 
@@ -565,16 +620,177 @@ function selectContractEditSuggestion(item: ContractSuggestion): void {
   contractEditForm.value.exchange = item.exchange
 }
 
+function flattenContractGroups(groups: ContractGroup[]): ContractConfig[] {
+  return groups.flatMap((group) => group.contracts)
+}
+
 async function loadContracts(): Promise<void> {
-  const { data } = await client.get<ContractConfig[]>('/contracts')
-  contracts.value = data
-  if (!data.some((contract) => contract.id === selectedId.value) && data.length) {
-    await selectContract(data[0]!.id)
+  const { data } = await client.get<ContractGroup[]>('/contracts/groups')
+  contractGroups.value = data
+  contracts.value = flattenContractGroups(data)
+  if (!data.some((group) => group.id === activeGroupId.value)) {
+    activeGroupId.value = data[0]?.id || null
+  }
+  if (!contracts.value.some((contract) => contract.id === selectedId.value) && contracts.value.length) {
+    await selectContract(contracts.value[0]!.id)
+  }
+}
+
+function openAddContract(groupId: number | null = activeGroupId.value): void {
+  form.value = { exchange: '', code: '', name: '', group_id: groupId }
+  addVisible.value = true
+}
+
+async function createGroup(): Promise<void> {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入分组名称', '添加分组', {
+      confirmButtonText: '添加',
+      cancelButtonText: '取消',
+      inputValue: `自定义${contractGroups.value.length + 1}`,
+      inputPattern: /\S+/,
+      inputErrorMessage: '分组名称不能为空',
+    })
+    const { data } = await client.post<ContractGroup>('/contracts/groups', { name: value.trim() })
+    contractGroups.value.push(data)
+    activeGroupId.value = data.id
+  } catch (error: any) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error.response?.data?.detail || '添加分组失败')
+    }
+  }
+}
+
+async function renameGroup(group: ContractGroup): Promise<void> {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的分组名称', '重命名分组', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputValue: group.name,
+      inputPattern: /\S+/,
+      inputErrorMessage: '分组名称不能为空',
+    })
+    const { data } = await client.put<ContractGroup>(`/contracts/groups/${group.id}`, { name: value.trim() })
+    const index = contractGroups.value.findIndex((item) => item.id === group.id)
+    if (index >= 0) contractGroups.value[index] = data
+  } catch (error: any) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error.response?.data?.detail || '重命名分组失败')
+    }
+  }
+}
+
+function beginContractDrag(contract: ContractConfig, groupId: number, event: DragEvent): void {
+  draggedContractId.value = contract.id
+  draggedSourceGroupId.value = groupId
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(contract.id))
+  }
+}
+
+function finishContractDrag(): void {
+  draggedContractId.value = null
+  draggedSourceGroupId.value = null
+}
+
+function allowContractDrop(event: DragEvent): void {
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+async function dropContract(group: ContractGroup, index: number): Promise<void> {
+  const contractId = draggedContractId.value
+  const sourceGroupId = draggedSourceGroupId.value
+  finishContractDrag()
+  if (!contractId || !sourceGroupId) return
+  const sourceGroup = contractGroups.value.find((item) => item.id === sourceGroupId)
+  const targetGroup = contractGroups.value.find((item) => item.id === group.id)
+  if (!sourceGroup || !targetGroup) return
+  const sourceIndex = sourceGroup.contracts.findIndex((item) => item.id === contractId)
+  if (sourceIndex < 0) return
+  const [moved] = sourceGroup.contracts.splice(sourceIndex, 1)
+  if (!moved) return
+  if (sourceGroup.id === targetGroup.id && sourceIndex < index) index -= 1
+  moved.group_id = targetGroup.id
+  targetGroup.contracts.splice(Math.max(0, index), 0, moved)
+  contracts.value = flattenContractGroups(contractGroups.value)
+  try {
+    if (sourceGroup.id !== targetGroup.id) {
+      await client.put(`/contracts/${contractId}/group`, { group_id: targetGroup.id })
+      await client.put(`/contracts/groups/${sourceGroup.id}/order`, {
+        contract_ids: sourceGroup.contracts.map((item) => item.id),
+      })
+    }
+    await client.put(`/contracts/groups/${targetGroup.id}/order`, {
+      contract_ids: targetGroup.contracts.map((item) => item.id),
+    })
+  } catch (error: any) {
+    await loadContracts()
+    ElMessage.error(error.response?.data?.detail || '保存合约顺序失败')
+  }
+}
+
+function togglePanel(panel: PanelKey): void {
+  collapsedPanels.value[panel] = !collapsedPanels.value[panel]
+  persistPanelLayout()
+}
+
+function panelStyle(panel: PanelKey): Record<string, string> {
+  const size = panelSizes.value[panel]
+  return {
+    ...(size.width ? { width: `${size.width}px` } : {}),
+    ...(!collapsedPanels.value[panel] && size.height ? { height: `${size.height}px` } : {}),
+  }
+}
+
+function persistPanelLayout(): void {
+  localStorage.setItem(panelLayoutKey, JSON.stringify({
+    collapsed: collapsedPanels.value,
+    sizes: panelSizes.value,
+  }))
+}
+
+function loadPanelLayout(): void {
+  try {
+    const saved = JSON.parse(localStorage.getItem(panelLayoutKey) || '{}') as {
+      collapsed?: Partial<Record<PanelKey, boolean>>
+      sizes?: Partial<Record<PanelKey, PanelSize>>
+    }
+    collapsedPanels.value = { ...collapsedPanels.value, ...(saved.collapsed || {}) }
+    panelSizes.value = { ...panelSizes.value, ...(saved.sizes || {}) }
+  } catch {
+    localStorage.removeItem(panelLayoutKey)
+  }
+}
+
+function observePanelSizes(): void {
+  if (typeof ResizeObserver === 'undefined') return
+  panelResizeObserver = new ResizeObserver((entries) => {
+    let changed = false
+    for (const entry of entries) {
+      const panel = (Object.entries(panelRefs) as [PanelKey, { value: HTMLElement | null }][])
+        .find(([, panelRef]) => panelRef.value === entry.target)?.[0]
+      if (!panel || collapsedPanels.value[panel]) continue
+      const width = Math.round(entry.contentRect.width)
+      const height = Math.round(entry.contentRect.height)
+      if (width < 80 || height < 60) continue
+      const previous = panelSizes.value[panel]
+      if (previous.width !== width || previous.height !== height) {
+        panelSizes.value[panel] = { width, height }
+        changed = true
+      }
+    }
+    if (changed) persistPanelLayout()
+  })
+  for (const panelRef of Object.values(panelRefs)) {
+    if (panelRef.value) panelResizeObserver.observe(panelRef.value)
   }
 }
 
 async function selectContract(id: number): Promise<void> {
   selectedId.value = id
+  const contract = contracts.value.find((item) => item.id === id)
+  if (contract?.group_id) activeGroupId.value = contract.group_id
   signalRetryAfter = 0
   signals.value = []
   periodNotes.value = {}
@@ -630,9 +846,9 @@ async function createContract(): Promise<void> {
   adding.value = true
   try {
     const { data } = await client.post<ContractConfig>('/contracts', form.value)
-    contracts.value.push(data)
     addVisible.value = false
-    form.value = { exchange: '', code: '', name: '' }
+    form.value = { exchange: '', code: '', name: '', group_id: activeGroupId.value }
+    await loadContracts()
     await selectContract(data.id)
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '添加失败')
@@ -701,7 +917,7 @@ async function savePeriod(): Promise<void> {
 async function removeContract(contract: ContractConfig): Promise<void> {
   await ElMessageBox.confirm(`确认删除 ${contract.symbol}？`, '删除合约', { type: 'warning' })
   await client.delete(`/contracts/${contract.id}`)
-  contracts.value = contracts.value.filter((item) => item.id !== contract.id)
+  await loadContracts()
   if (selectedId.value === contract.id) {
     selectedId.value = null
     signals.value = []
@@ -764,6 +980,8 @@ function credentialAlertType(): 'success' | 'error' | 'warning' | 'info' {
 
 onMounted(async () => {
   dashboardMounted = true
+  loadPanelLayout()
+  window.requestAnimationFrame(observePanelSizes)
   try {
     await loadContracts()
     timer = window.setInterval(() => void refreshSignals(), 3_000)
@@ -785,6 +1003,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   dashboardMounted = false
+  panelResizeObserver?.disconnect()
+  panelResizeObserver = null
   if (timer) window.clearInterval(timer)
   if (alertTimer) window.clearInterval(alertTimer)
   clearAlertSocketTimers()
@@ -823,78 +1043,96 @@ onBeforeUnmount(() => {
         </a>
         <el-button :icon="Refresh" :loading="refreshing" plain @click="refreshSignals(true)">更新数据</el-button>
         <el-button :icon="Setting" plain @click="openCredentials">天勤账号</el-button>
-        <el-button type="primary" :icon="Plus" @click="addVisible = true">添加合约</el-button>
+        <el-button type="primary" :icon="Plus" @click="openAddContract()">添加合约</el-button>
       </div>
     </header>
 
-    <section v-if="selectedContract" class="setup-section">
-      <div class="contract-ident">
-        <span>交易所</span><strong>{{ selectedContract.exchange }}</strong>
-        <span>交易合约</span><strong>{{ displayContractCode(selectedContract.code) }}</strong>
+    <section class="setup-section">
+      <div ref="groupsPanelRef" class="contract-groups-panel resizable-panel" :class="{ collapsed: collapsedPanels.groups }" :style="panelStyle('groups')">
+        <header class="panel-header contract-groups-header">
+          <div><h2>交易合约</h2><span>WATCHLIST · 拖动调整顺序</span></div>
+          <button type="button" class="panel-toggle" @click="togglePanel('groups')">{{ collapsedPanels.groups ? '展开' : '折叠' }}</button>
+        </header>
+        <div v-if="!collapsedPanels.groups" class="group-columns">
+          <article v-for="group in contractGroups" :key="group.id" class="contract-group" :class="{ active: group.id === activeGroupId }" @click="activeGroupId = group.id">
+            <header class="contract-group-header">
+              <button type="button" class="group-name" @click.stop="activeGroupId = group.id">{{ group.name }}</button>
+              <div class="group-actions">
+                <el-button :icon="Plus" text title="向该分组添加合约" @click.stop="openAddContract(group.id)" />
+                <el-button :icon="EditPen" text title="重命名分组" @click.stop="renameGroup(group)" />
+              </div>
+            </header>
+            <div class="contract-group-list" @dragover="allowContractDrop" @drop="dropContract(group, group.contracts.length)">
+              <div
+                v-for="(contract, index) in group.contracts"
+                :key="contract.id"
+                class="contract-row"
+                :class="{ active: contract.id === selectedId, dragging: contract.id === draggedContractId }"
+                draggable="true"
+                @click="selectContract(contract.id)"
+                @dragstart="beginContractDrag(contract, group.id, $event)"
+                @dragend="finishContractDrag"
+                @dragover="allowContractDrop"
+                @drop.stop="dropContract(group, index)"
+              >
+                <span class="contract-code"><small>{{ contract.exchange }}</small><strong>{{ displayContractCode(contract.code) }}</strong></span>
+                <span class="contract-actions"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></span>
+              </div>
+              <button type="button" class="group-add-contract" @click.stop="openAddContract(group.id)"><el-icon><Plus /></el-icon>添加合约</button>
+            </div>
+          </article>
+          <button type="button" class="add-group-card" @click="createGroup"><el-icon><Plus /></el-icon><span>添加分组</span></button>
+        </div>
       </div>
-      <div class="setup-table-wrap">
-        <table class="setup-table"><thead><tr><th>周期设置</th><th>M4设置</th><th>M3设置</th><th>M2设置</th><th>M1设置</th><th></th></tr></thead><tbody>
-          <tr v-for="period in selectedContract.periods" :key="period.duration_seconds"><td>{{ period.label }}</td><td>{{ period.m4 }}</td><td>{{ period.m3 }}</td><td>{{ period.m2 }}</td><td>{{ period.m1 }}</td><td class="row-actions"><el-button :icon="EditPen" text title="编辑周期" @click="openPeriod(period)" /><el-button :icon="Delete" text type="danger" title="删除周期" @click="removePeriod(period)" /></td></tr>
-        </tbody></table>
-        <el-button class="add-period" :icon="Plus" text @click="openPeriod()">添加周期</el-button>
+
+      <div ref="setupPanelRef" class="setup-details-panel resizable-panel" :class="{ collapsed: collapsedPanels.setup }" :style="panelStyle('setup')">
+        <header class="panel-header">
+          <div><span>当前合约设置</span><strong v-if="selectedContract">{{ displayContractCode(selectedContract.code) }}</strong></div>
+          <button type="button" class="panel-toggle" @click="togglePanel('setup')">{{ collapsedPanels.setup ? '展开' : '折叠' }}</button>
+        </header>
+        <div v-if="!collapsedPanels.setup" class="setup-details-content">
+          <div v-if="selectedContract" class="contract-ident">
+            <span>交易所</span><strong>{{ selectedContract.exchange }}</strong>
+            <span>交易合约</span><strong>{{ displayContractCode(selectedContract.code) }}</strong>
+          </div>
+          <div v-if="selectedContract" class="setup-table-wrap">
+            <table class="setup-table"><thead><tr><th>周期设置</th><th>M4设置</th><th>M3设置</th><th>M2设置</th><th>M1设置</th><th></th></tr></thead><tbody>
+              <tr v-for="period in selectedContract.periods" :key="period.duration_seconds"><td>{{ period.label }}</td><td>{{ period.m4 }}</td><td>{{ period.m3 }}</td><td>{{ period.m2 }}</td><td>{{ period.m1 }}</td><td class="row-actions"><el-button :icon="EditPen" text title="编辑周期" @click="openPeriod(period)" /><el-button :icon="Delete" text type="danger" title="删除周期" @click="removePeriod(period)" /></td></tr>
+            </tbody></table>
+            <el-button class="add-period" :icon="Plus" text @click="openPeriod()">添加周期</el-button>
+          </div>
+          <div v-else class="empty-signals">添加并选择一个合约后配置周期</div>
+        </div>
       </div>
     </section>
 
     <section class="monitor-section">
-      <div class="contract-list-wrap"><h2>交易合约</h2><table class="contract-table"><tbody><tr v-for="contract in contracts" :key="contract.id" :class="{ active: contract.id === selectedId }" @click="selectContract(contract.id)"><td>{{ contract.exchange }}</td><td><strong>{{ displayContractCode(contract.code) }}</strong></td><td class="contract-actions"><el-tooltip content="更换合约" placement="top"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /></el-tooltip><el-tooltip content="删除该合约" placement="top"><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></el-tooltip></td></tr></tbody></table><div v-if="!contracts.length" class="empty-list">添加合约后在这里查看</div></div>
-      <div class="signal-area">
-        <div v-if="errorText" class="data-error">{{ errorText }}</div>
-        <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td class="signal-state-cell"><div class="state signal-state-layout" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''"><span>{{ signal.label }}</span><span class="cross-type">{{ signal.cross_type || '' }}</span></div></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
-        <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
-        <footer v-if="selectedContract" class="ma-footer"><span>均线数值 · {{ displayContractCode(selectedContract.code) }} · {{ selectedSignal?.period.label || '--' }}：</span><strong>M4：{{ maText('M4') }}{{ longTrendText('m4') }}</strong><strong>M3：{{ maText('M3') }}{{ longTrendText('m3') }}</strong><strong>M2：{{ maText('M2') }}</strong><strong>M1：{{ maText('M1') }}</strong><small v-if="selectedSignal">{{ selectedSignal.period.label }} · {{ selectedSignal.bar_time.replace('T', ' ').slice(0, 19) }} · {{ dataStatusText(selectedSignal) }}</small><small v-else>等待可用的实时 K 线数据</small></footer>
-        <section class="alert-center" aria-label="全品种预警">
-          <header class="alert-center-header">
-            <div><span class="alert-kicker">MARKET SENTINEL</span><h2>全品种预警</h2></div>
-            <span class="alert-status" :class="{ scanning: alertScanning }">{{ alertStatusText }}</span>
-          </header>
-          <div class="alert-control-row">
-            <strong>预警周期</strong>
-            <div class="alert-options">
-              <button
-                v-for="period in commonPeriods"
-                :key="period.durationSeconds"
-                type="button"
-                :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }"
-                :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)"
-                @click="toggleAlertDuration(period.durationSeconds)"
-              >{{ period.label }}</button>
-            </div>
-          </div>
-          <div class="alert-control-row conditions">
-            <strong>预警条件</strong>
-            <div class="alert-options">
-              <button
-                v-for="condition in alertConditionOptions"
-                :key="condition"
-                type="button"
-                :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }"
-                :aria-pressed="selectedAlertConditions.includes(condition)"
-                @click="toggleAlertCondition(condition)"
-              >{{ condition }}</button>
-            </div>
-          </div>
-          <div class="alert-results">
-            <div v-if="matchingAlertSignals.length" class="alert-result-grid">
-              <div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item">
-                <span class="signal-pulse"></span>
-                <span class="alert-result-text">{{ alertText(signal) }}</span>
-                <span v-if="isLatestAlertSignal(signal)" class="alert-new-badge">NEW</span>
-              </div>
-            </div>
-            <div v-else class="alert-empty">{{ alertStatusText }}</div>
-          </div>
-          <footer class="alert-center-footer">
-            <span>仅监测当前账号自选合约已配置的周期</span>
-            <span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span>
-            <span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span>
-          </footer>
-        </section>
+      <div ref="signalsPanelRef" class="signal-area resizable-panel" :class="{ collapsed: collapsedPanels.signals }" :style="panelStyle('signals')">
+        <header class="panel-header signal-panel-header">
+          <div><span>均线信号</span><strong v-if="selectedContract">{{ displayContractCode(selectedContract.code) }}</strong></div>
+          <button type="button" class="panel-toggle" @click="togglePanel('signals')">{{ collapsedPanels.signals ? '展开' : '折叠' }}</button>
+        </header>
+        <div v-if="!collapsedPanels.signals">
+          <div v-if="errorText" class="data-error">{{ errorText }}</div>
+          <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>均线4</th><th>均线3</th><th>均线1上穿/下穿均线2</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td class="signal-state-cell"><div class="state signal-state-layout" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''"><span>{{ signal.label }}</span><span class="cross-type">{{ signal.cross_type || '' }}</span></div></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
+          <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
+          <footer v-if="selectedContract" class="ma-footer"><span>均线数值 · {{ displayContractCode(selectedContract.code) }} · {{ selectedSignal?.period.label || '--' }}：</span><strong>M4：{{ maText('M4') }}{{ longTrendText('m4') }}</strong><strong>M3：{{ maText('M3') }}{{ longTrendText('m3') }}</strong><strong>M2：{{ maText('M2') }}</strong><strong>M1：{{ maText('M1') }}</strong><small v-if="selectedSignal">{{ selectedSignal.period.label }} · {{ selectedSignal.bar_time.replace('T', ' ').slice(0, 19) }} · {{ dataStatusText(selectedSignal) }}</small><small v-else>等待可用的实时 K 线数据</small></footer>
+        </div>
       </div>
+
+      <section ref="alertsPanelRef" class="alert-center resizable-panel" :class="{ collapsed: collapsedPanels.alerts }" :style="panelStyle('alerts')" aria-label="全品种预警">
+        <header class="alert-center-header">
+          <div><span class="alert-kicker">MARKET SENTINEL</span><h2>全品种预警</h2></div>
+          <div class="alert-header-actions"><span class="alert-status" :class="{ scanning: alertScanning }">{{ alertStatusText }}</span><button type="button" class="panel-toggle" @click="togglePanel('alerts')">{{ collapsedPanels.alerts ? '展开' : '折叠' }}</button></div>
+        </header>
+        <div v-if="!collapsedPanels.alerts">
+          <div class="alert-control-row"><strong>预警周期</strong><div class="alert-options"><button v-for="period in commonPeriods" :key="period.durationSeconds" type="button" :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }" :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)" @click="toggleAlertDuration(period.durationSeconds)">{{ period.label }}</button></div></div>
+          <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="selectedAlertConditions.includes(condition)" @click="toggleAlertCondition(condition)">{{ condition }}</button></div></div>
+          <div class="alert-control-row states"><strong>状态条件</strong><div class="alert-options"><button v-for="state in alertStateOptions" :key="state" type="button" :class="{ active: selectedAlertStates.includes(state) }" :aria-pressed="selectedAlertStates.includes(state)" @click="toggleAlertState(state)">{{ state }}</button></div></div>
+          <div class="alert-results"><div v-if="matchingAlertSignals.length" class="alert-result-grid"><div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item"><span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="isLatestAlertSignal(signal)" class="alert-new-badge">NEW</span></div></div><div v-else class="alert-empty">{{ alertStatusText }}</div></div>
+          <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
+        </div>
+      </section>
     </section>
 
     <Transition name="alert-popup">
@@ -915,7 +1153,7 @@ onBeforeUnmount(() => {
     </Transition>
 
     <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close>
-      <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item></el-form>
+      <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item><el-form-item label="所属分组"><el-select v-model="form.group_id" class="full-width"><el-option v-for="group in contractGroups" :key="group.id" :label="group.name" :value="group.id" /></el-select></el-form-item></el-form>
       <template #footer><el-button :disabled="adding" @click="addVisible = false">取消</el-button><el-button type="primary" :loading="adding" @click="createContract">验证并添加</el-button></template>
     </el-dialog>
 
