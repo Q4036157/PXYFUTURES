@@ -139,17 +139,32 @@ async function main() {
     await send([next, other, otherPeriod])
     assert.deepEqual((await page.locator('.alert-new-badge').allTextContents()).sort(), ['+1', '+1', '+2'])
     results.push('历史行情、无交叉与未选周期不触发或增加计数')
+    state[0].contracts.push({ ...fixture[0].contracts[0], id: 5, exchange: 'DCE', code: 'PVC2609', symbol: 'DCE.pvc2609', name: 'PVC2609', market_status: 'expired', sort_order: 4 })
+    await page.reload()
+    await page.waitForSelector('.contract-expiry-tag')
     const screenshotDir = process.env.PXY_SCREENSHOT_DIR || require('node:os').tmpdir()
     for (const width of [1440, 1024, 960, 721, 720, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 })
       await page.waitForTimeout(100)
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `页面溢出：${width}`)
-      const bounds = await page.locator('.contract-row').evaluateAll(rows => rows.map(row => ({ row: row.getBoundingClientRect().right, action: row.querySelector('.contract-actions').getBoundingClientRect().right, code: row.querySelector('.contract-code strong').getBoundingClientRect() })).map(item => ({ fits: item.action <= item.row + 1, codeWidth: item.code.width })))
-      assert.ok(bounds.every(item => item.fits && item.codeWidth > 30), `合约代码或按钮挤压：${width}`)
+      const bounds = await page.locator('.contract-row').evaluateAll(rows => rows.map(row => ({
+        row: row.getBoundingClientRect(),
+        action: row.querySelector('.contract-actions').getBoundingClientRect(),
+        exchange: row.querySelector('.contract-code small').getBoundingClientRect(),
+        code: row.querySelector('.contract-code strong').getBoundingClientRect(),
+        codeFits: row.querySelector('.contract-code strong').scrollWidth <= row.querySelector('.contract-code strong').clientWidth + 1,
+      })).map(item => ({
+        fits: item.action.right <= item.row.right + 1,
+        codeWidth: item.code.width,
+        codeFits: item.codeFits,
+        singleLine: item.exchange.right <= item.code.left && item.exchange.top < item.code.bottom && item.code.top < item.exchange.bottom,
+      })))
+      assert.ok(bounds.every(item => item.fits && item.codeWidth > 30 && item.codeFits), `合约代码或按钮挤压：${width}`)
+      assert.ok(bounds.every(item => item.singleLine), `交易所与合约代码未在同一行：${width}`)
       if ([1440, 390].includes(width)) await page.screenshot({ path: path.join(screenshotDir, `pxyfutures-sort-count-${width}.png`), fullPage: true })
     }
     assert.deepEqual(errors, [])
-    results.push('七种桌面和手机宽度无溢出、代码与按钮可见、无页面异常')
+    results.push('七种桌面和手机宽度交易所与合约代码同排、无溢出、代码与按钮可见、无页面异常')
     console.log(JSON.stringify({ passed: results.length, results }, null, 2))
   } finally { await context.close(); await browser.close() }
 }
