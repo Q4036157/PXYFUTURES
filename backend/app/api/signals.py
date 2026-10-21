@@ -103,6 +103,12 @@ def _snapshot_from_market_bars(
         config,
         confirmed_bar_count=None if confirmed_only else len(bars) - 1,
     )
+    # 超过七天的数据只标为历史，不据此猜测合约到期或交易日历。
+    historical = bars[-1].timestamp_ns < int(
+        (datetime.now(_CHINA_TZ) - timedelta(days=7)).timestamp() * 1_000_000_000
+    )
+    data_status = ("expired" if market_bars.source == "historical" else
+                   "historical" if historical else "current")
     logger.debug(
         "均线计算成功: symbol=%s period=%s bars=%d ma=%s cross=%s label=%s",
         symbol,
@@ -126,6 +132,7 @@ def _snapshot_from_market_bars(
         # 下一根 K 线出现时，上一根才具备确定的收盘确认；该时刻用于拦截迟到旧提醒。
         "confirmed_at": _iso_time(bars[-1].timestamp_ns),
         "data_source": market_bars.source,
+        "data_status": data_status,
         "data_updated_at": (
             datetime.fromtimestamp(
                 market_bars.updated_at_ns / 1_000_000_000, tz=_CHINA_TZ
@@ -198,6 +205,8 @@ def _scan_cached_alert_jobs(
             failed += 1
             logger.debug("预警缓存计算跳过: symbol=%s error=%s", contract.symbol, exc)
             continue
+        if snapshot["data_status"] != "current":
+            continue
         snapshots.append(
             {
                 "contract_id": contract.id,
@@ -213,18 +222,29 @@ def scan_cached_alerts_for_user(
     repository: ConfigRepository,
     user_id: str,
     durations: frozenset[int],
+    *,
+    client: TqClient | None = None,
 ) -> dict[str, object]:
     """供HTTP扫描和WebSocket收K推送共同使用同一份确定性计算。"""
     if not durations:
         return {"signals": [], "requested": 0, "failed": 0}
+    contracts = repository.list_contracts(user_id)
+    excluded = {
+        contract.symbol for contract in contracts
+        if client is not None and client.contract_status(contract.symbol) == "expired"
+    }
     jobs = [
         (contract, period)
-        for contract in repository.list_contracts(user_id)
+        for contract in contracts
+        if contract.symbol not in excluded
         for period in contract.periods
         if period.duration_seconds in durations
     ]
     snapshots, failed = _scan_cached_alert_jobs(repository, jobs)
-    return {"signals": snapshots, "requested": len(jobs), "failed": failed}
+    result = {"signals": snapshots, "requested": len(jobs), "failed": failed}
+    if excluded:
+        result["excluded_contracts"] = len(excluded)
+    return result
 
 
 def _websocket_user_id(websocket: WebSocket) -> str | None:
@@ -328,11 +348,17 @@ async def get_signals(
         if isinstance(result, BaseException):
             raise result
         signals.append(result)
+    market_status = client.contract_status(contract.symbol) if isinstance(client, TqClient) else "unknown"
+    if market_status == "expired":
+        warnings.append("该合约已到期，仅展示历史行情，已退出实时订阅和预警；可使用更换合约按钮切换")
+    elif any(signal.get("data_status") == "historical" for signal in signals):
+        warnings.append("当前K线距今超过七天，仅供历史查看，不作为实时预警")
     return {
         "contract_id": contract.id,
         "symbol": contract.symbol,
         "signals": signals,
         "warnings": warnings,
+        "market_status": market_status,
     }
 
 
@@ -349,4 +375,5 @@ async def scan_alerts(
         repository,
         user_id,
         frozenset(body.durations),
+        client=getattr(request.app.state, "tq_client", None),
     )

@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from time import monotonic
 
 from app.market.boyi_kline import base_count_for, base_duration_for, should_rebuild_for_boyi
-from app.market.tq_client import TqClient, TqCredentialsInvalid
+from app.market.tq_client import MarketDataUnavailable, TqClient, TqCredentialsInvalid
 from app.services.repository import ConfigRepository, ContractConfig
+from app.services.runtime_notices import RuntimeNoticeLimiter
 
 logger = logging.getLogger(__name__)
 _STATE_LOOKBACK_BARS = 300
@@ -123,13 +124,14 @@ async def run_market_sync_loop(
     logger.info("后台行情事件同步已启动，订阅刷新间隔 %.0f 秒", interval_seconds)
     jobs: list[MarketSyncJob] = []
     refresh_deadline = 0.0
+    notices = RuntimeNoticeLimiter(logger)
     while not stop_event.is_set():
         now = monotonic()
         if now >= refresh_deadline:
             contracts = await asyncio.to_thread(repository.list_all_contracts)
             jobs = build_market_sync_jobs(contracts)
             refresh_deadline = now + interval_seconds
-            logger.info("后台行情订阅已刷新: 基础订阅=%d", len(jobs))
+            logger.info("后台行情订阅已刷新: 候选基础订阅=%d", len(jobs))
 
         if not jobs:
             try:
@@ -157,13 +159,18 @@ async def run_market_sync_loop(
                 except TimeoutError:
                     pass
             continue
-        except Exception:
-            logger.warning("天勤事件同步暂时失败，3秒后重试", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            notices.warning(
+                "market-sync", "天勤事件同步暂时失败，将按连接冷却时间恢复: 类型=%s",
+                type(exc).__name__,
+                exc_info=not isinstance(exc, MarketDataUnavailable),
+            )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=3.0)
             except TimeoutError:
                 pass
             continue
+        notices.recover("market-sync", "天勤事件同步已恢复")
         if event.changed_sources and on_rollover is not None:
             logger.info(
                 "后台行情检测到收K: 基础序列=%d",

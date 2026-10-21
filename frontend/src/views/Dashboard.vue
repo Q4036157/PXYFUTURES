@@ -48,6 +48,7 @@ const contractEditForm = ref({ exchange: '', code: '', name: '' })
 const periodForm = ref({ label: '日线', duration_seconds: 86400, m4: 240, m3: 60, m2: 21, m1: 4 })
 const credentials = ref({ username: '', password: '' })
 let timer: number | undefined
+let contractStatusTimer: number | undefined
 let alertTimer: number | undefined
 let alertSocketReconnectTimer: number | undefined
 let alertSocketHeartbeatTimer: number | undefined
@@ -78,6 +79,7 @@ const alertSignals = ref<AlertSignalSnapshot[]>([])
 const alertScanning = ref(false)
 const alertScanError = ref('')
 const alertFailedCount = ref(0)
+const alertExcludedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
 const alertPopupBeijingTime = ref('')
@@ -104,6 +106,7 @@ const platformReturnVisible = window.location.pathname === '/futures-app'
   || window.self !== window.top
 
 const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡']
+const alertPreferencesKey = 'pxy-futures-alert-preferences-v1'
 const panelLayoutKey = 'pxy-futures-panel-layout-v3'
 const collapsedPanels = ref<Record<PanelKey, boolean>>({
   groups: false,
@@ -180,7 +183,7 @@ const matchingAlertSignals = computed(() => {
 
 const alertStatusText = computed(() => {
   if (!selectedAlertDurations.value.length) {
-    return '请选择周期开始监测'
+    return '预警未开启，请选择监测周期'
   }
   if (alertScanning.value) return '正在扫描自选合约'
   if (alertScanError.value) return alertScanError.value
@@ -188,7 +191,8 @@ const alertStatusText = computed(() => {
     return `当前匹配 ${matchingAlertSignals.value.length} 条，${alertFailedCount.value} 条等待行情缓存`
   }
   const channel = alertStreamConnected.value ? '实时推送 · 5秒校验' : '连接恢复中 · 5秒校验'
-  return `当前匹配 ${matchingAlertSignals.value.length} 条 · ${channel}`
+  const excluded = alertExcludedCount.value ? ` · 已排除 ${alertExcludedCount.value} 个到期合约` : ''
+  return `当前匹配 ${matchingAlertSignals.value.length} 条 · ${channel}${excluded}`
 })
 
 function alertCondition(signal: AlertSignalSnapshot): AlertCondition | null {
@@ -213,11 +217,50 @@ function isLatestAlertSignal(signal: AlertSignalSnapshot): boolean {
 }
 
 function isFreshAlertSignal(signal: AlertSignalSnapshot): boolean {
-  if (signal.period.duration_seconds >= 86_400) return true
+  if (signal.data_status === 'historical' || signal.data_status === 'expired' || signal.data_source === 'historical') return false
   const confirmedAt = Date.parse(signal.confirmed_at)
   if (!Number.isFinite(confirmedAt)) return false
   const age = Date.now() - confirmedAt
-  return age >= -10_000 && age <= ALERT_FRESHNESS_MS
+  const maxAge = signal.period.duration_seconds >= 86_400 ? 7 * 86_400_000 : ALERT_FRESHNESS_MS
+  return age >= -10_000 && age <= maxAge
+}
+
+function persistAlertPreferences(): void {
+  try {
+    localStorage.setItem(alertPreferencesKey, JSON.stringify({
+      durations: selectedAlertDurations.value,
+      conditions: selectedAlertConditions.value,
+      states: selectedAlertStates.value,
+    }))
+  } catch {
+    // 无法持久化时，当前页面的监测设置仍然有效。
+  }
+}
+
+function loadAlertPreferences(): void {
+  try {
+    const saved = JSON.parse(localStorage.getItem(alertPreferencesKey) || '{}')
+    if (Array.isArray(saved.durations)) selectedAlertDurations.value = [...new Set<number>(
+      saved.durations.filter((value: unknown): value is number =>
+        typeof value === 'number' && commonPeriods.some((period) => period.durationSeconds === value)),
+    )]
+    if (Array.isArray(saved.conditions)) selectedAlertConditions.value = [...new Set<AlertCondition>(
+      saved.conditions.filter((value: AlertCondition) => alertConditionOptions.includes(value)),
+    )]
+    if (Array.isArray(saved.states)) selectedAlertStates.value = [...new Set<AlertState>(
+      saved.states.filter((value: AlertState) => alertStateOptions.includes(value)),
+    )]
+  } catch {
+    // 未保存、损坏或禁用存储时保持未开启，不擅自改变用户预警选择。
+  }
+}
+
+function enableAllAlertPeriods(): void {
+  enableBrowserAlerts()
+  selectedAlertDurations.value = commonPeriods.map((period) => period.durationSeconds)
+  persistAlertPreferences()
+  syncAlertSubscription()
+  if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
 function getAlertAudio(): HTMLAudioElement {
@@ -249,6 +292,7 @@ function toggleAlertDuration(durationSeconds: number): void {
   selectedAlertDurations.value = selectedAlertDurations.value.includes(durationSeconds)
     ? selectedAlertDurations.value.filter((value) => value !== durationSeconds)
     : [...selectedAlertDurations.value, durationSeconds]
+  persistAlertPreferences()
   syncAlertSubscription()
   if (!alertStreamConnected.value) void refreshAlertSignals()
 }
@@ -258,6 +302,7 @@ function toggleAlertCondition(condition: AlertCondition): void {
   selectedAlertConditions.value = selectedAlertConditions.value.includes(condition)
     ? selectedAlertConditions.value.filter((value) => value !== condition)
     : [...selectedAlertConditions.value, condition]
+  persistAlertPreferences()
   syncAlertSubscription()
   if (!alertStreamConnected.value) void refreshAlertSignals()
 }
@@ -267,6 +312,7 @@ function toggleAlertState(state: AlertState): void {
   selectedAlertStates.value = selectedAlertStates.value.includes(state)
     ? selectedAlertStates.value.filter((value) => value !== state)
     : [...selectedAlertStates.value, state]
+  persistAlertPreferences()
   syncAlertSubscription()
   if (!alertStreamConnected.value) void refreshAlertSignals()
 }
@@ -325,6 +371,7 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
 function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): void {
   alertSignals.value = data.signals
   alertFailedCount.value = data.failed
+  alertExcludedCount.value = data.excluded_contracts ?? 0
   if (!allowNotification) return
 
   const selectedConditions = new Set(selectedAlertConditions.value)
@@ -494,9 +541,11 @@ function longTrendText(name: 'm3' | 'm4'): string {
 }
 
 function dataStatusText(signal: SignalSnapshot): string {
-  if (signal.data_source === 'live') return '实时行情'
+  if (signal.data_status === 'expired' || signal.data_source === 'historical') return '到期合约 · 历史行情'
+  if (signal.data_status === 'historical') return '历史行情 · 非实时'
   const syncedAt = signal.data_updated_at?.replace('T', ' ').slice(0, 19)
-  return syncedAt ? `本地缓存 · ${syncedAt}` : '本地缓存'
+  const source = signal.data_source === 'live' ? '行情连接正常' : '本地缓存'
+  return syncedAt ? `${source} · 同步时间 ${syncedAt}` : source
 }
 
 function displayContractCode(code: string): string {
@@ -861,6 +910,7 @@ async function refreshSignals(force = false): Promise<void> {
     })
     if (selectedId.value !== contractId || signalAbortController !== controller) return
     signals.value = data.signals
+    if (selectedContract.value && data.market_status) selectedContract.value.market_status = data.market_status
     const warnings = data.warnings ?? []
     errorText.value = warnings.join('；')
     signalRetryAfter = warnings.length ? Date.now() + SIGNAL_WARNING_RETRY_MS : 0
@@ -1026,10 +1076,12 @@ function credentialAlertType(): 'success' | 'error' | 'warning' | 'info' {
 onMounted(async () => {
   dashboardMounted = true
   loadPanelLayout()
+  loadAlertPreferences()
   window.requestAnimationFrame(observePanelSizes)
   try {
     await loadContracts()
     timer = window.setInterval(() => void refreshSignals(), 3_000)
+    contractStatusTimer = window.setInterval(() => void loadContracts().catch(() => undefined), 60_000)
     alertTimer = window.setInterval(
       () => void refreshAlertSignals(true),
       ALERT_SAFETY_SCAN_MS,
@@ -1051,6 +1103,7 @@ onBeforeUnmount(() => {
   panelResizeObserver?.disconnect()
   panelResizeObserver = null
   if (timer) window.clearInterval(timer)
+  if (contractStatusTimer) window.clearInterval(contractStatusTimer)
   if (alertTimer) window.clearInterval(alertTimer)
   clearAlertSocketTimers()
   if (alertSocket) {
@@ -1111,14 +1164,14 @@ onBeforeUnmount(() => {
               :class="{ active: group.id === activeGroupId }"
               :aria-selected="group.id === activeGroupId"
               :aria-controls="`group-panel-${group.id}`"
-              :aria-label="`分组 ${index + 1}：${group.name}`"
+              :aria-label="`分组：${group.name}`"
               :tabindex="group.id === activeGroupId ? 0 : -1"
               :title="`${group.name} · 拖入合约可移到此组`"
               @click="activeGroupId = group.id"
               @keydown="navigateGroupTabs($event, index)"
               @dragover="allowContractDrop"
               @drop.prevent="dropContract(group, group.contracts.length)"
-            >{{ index + 1 }}</button>
+            >{{ group.name }}</button>
             <button type="button" class="group-tab group-tab-add" title="添加分组" aria-label="添加分组" @click="createGroup"><el-icon><Plus /></el-icon></button>
           </div>
           <article v-if="activeGroup" :id="`group-panel-${activeGroup.id}`" :key="activeGroup.id" class="contract-group active" role="tabpanel" :aria-labelledby="`group-tab-${activeGroup.id}`">
@@ -1134,7 +1187,8 @@ onBeforeUnmount(() => {
                 v-for="(contract, index) in activeGroup.contracts"
                 :key="contract.id"
                 class="contract-row"
-                :class="{ active: contract.id === selectedId, dragging: contract.id === draggedContractId }"
+                :class="{ active: contract.id === selectedId, dragging: contract.id === draggedContractId, historical: contract.market_status === 'expired' }"
+                :title="contract.market_status === 'expired' ? '已到期，仅保留历史查看，已退出实时监控' : contract.name"
                 draggable="true"
                 @click="selectContract(contract.id)"
                 @dragstart="beginContractDrag(contract, activeGroup.id, $event)"
@@ -1142,7 +1196,7 @@ onBeforeUnmount(() => {
                 @dragover="allowContractDrop"
                 @drop.stop="dropContract(activeGroup, index)"
               >
-                <span class="contract-code"><small>{{ contract.exchange }}</small><strong>{{ displayContractCode(contract.code) }}</strong></span>
+                <span class="contract-code"><small>{{ contract.exchange }}</small><strong>{{ displayContractCode(contract.code) }}</strong><span v-if="contract.market_status === 'expired'" class="contract-expiry-tag">到期</span></span>
                 <span class="contract-actions"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></span>
               </div>
               <p v-if="!activeGroup.contracts.length" class="group-empty">该分组暂无合约</p>
@@ -1191,6 +1245,7 @@ onBeforeUnmount(() => {
           <div class="alert-header-actions"><span class="alert-status" :class="{ scanning: alertScanning }">{{ alertStatusText }}</span><button type="button" class="panel-toggle" @click="togglePanel('alerts')">{{ collapsedPanels.alerts ? '展开' : '折叠' }}</button></div>
         </header>
         <div v-if="!collapsedPanels.alerts">
+          <div v-if="!selectedAlertDurations.length" class="alert-inactive" role="status"><span>尚未开启预警。选择监测周期后生效，设置会自动保存。</span><button type="button" @click="enableAllAlertPeriods">开启全部周期</button></div>
           <div class="alert-control-row"><strong>预警周期</strong><div class="alert-options"><button v-for="period in commonPeriods" :key="period.durationSeconds" type="button" :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }" :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)" @click="toggleAlertDuration(period.durationSeconds)">{{ period.label }}</button></div></div>
           <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="selectedAlertConditions.includes(condition)" @click="toggleAlertCondition(condition)">{{ condition }}</button></div></div>
           <div class="alert-control-row states"><strong>状态条件</strong><div class="alert-options"><button v-for="state in alertStateOptions" :key="state" type="button" :class="{ active: selectedAlertStates.includes(state) }" :aria-pressed="selectedAlertStates.includes(state)" @click="toggleAlertState(state)">{{ state }}</button></div></div>

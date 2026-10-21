@@ -5,6 +5,7 @@ import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -41,7 +42,7 @@ async def lifespan(app: FastAPI):
     app.state.tq_client = TqClient()
     app.state.alert_stream = AlertStreamService(
         app.state.config_repository,
-        signals.scan_cached_alerts_for_user,
+        partial(signals.scan_cached_alerts_for_user, client=app.state.tq_client),
     )
     app.state.market_sync_stop = asyncio.Event()
     app.state.market_sync_task = asyncio.create_task(

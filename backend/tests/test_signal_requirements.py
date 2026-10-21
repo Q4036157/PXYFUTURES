@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from time import time_ns
 from types import SimpleNamespace
 
 import pytest
@@ -94,7 +95,13 @@ class MixedHistoryClient:
         repository: object,
     ) -> MarketBars:
         bar_count = 59 if duration_seconds == 86_400 else 20
-        return MarketBars([Bar(index, 100.0) for index in range(bar_count)], "cache", 1)
+        end_ns = time_ns()
+        interval_ns = duration_seconds * 1_000_000_000
+        return MarketBars(
+            [Bar(end_ns - (bar_count - index) * interval_ns, 100.0) for index in range(bar_count)],
+            "cache",
+            1,
+        )
 
 
 class SingleContractRepository:

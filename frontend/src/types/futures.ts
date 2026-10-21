@@ -18,6 +18,7 @@ export interface ContractConfig {
   periods: PeriodConfig[]
   group_id: number | null
   sort_order: number
+  market_status?: 'active' | 'expired' | 'unknown'
 }
 
 export interface ContractGroup {
@@ -39,7 +40,8 @@ export interface SignalSnapshot {
   bar_time: string
   confirmed_bar_time: string
   confirmed_at: string
-  data_source: 'live' | 'cache'
+  data_source: 'live' | 'cache' | 'historical'
+  data_status?: 'current' | 'historical' | 'expired'
   data_updated_at: string | null
 }
 
@@ -53,6 +55,7 @@ export interface AlertScanResult {
   signals: AlertSignalSnapshot[]
   requested: number
   failed: number
+  excluded_contracts?: number
 }
 
 export interface AlertStreamSnapshot extends AlertScanResult {
@@ -67,4 +70,5 @@ export interface ContractSignals {
   symbol: string
   signals: SignalSnapshot[]
   warnings?: string[]
+  market_status?: 'active' | 'expired' | 'unknown'
 }

@@ -59,7 +59,7 @@ def _repo(request: Request) -> ConfigRepository:
     return request.app.state.config_repository
 
 
-def _serialize(contract: ContractConfig) -> dict[str, object]:
+def _serialize(contract: ContractConfig, client: TqClient | None = None) -> dict[str, object]:
     exchange, _, code = contract.symbol.partition(".")
     return {
         "id": contract.id,
@@ -69,27 +69,30 @@ def _serialize(contract: ContractConfig) -> dict[str, object]:
         "name": contract.name,
         "group_id": contract.group_id,
         "sort_order": contract.sort_order,
+        "market_status": client.contract_status(contract.symbol) if client else "unknown",
         "periods": [period.__dict__ for period in contract.periods],
     }
 
 
-def _serialize_group(group: ContractGroup) -> dict[str, object]:
+def _serialize_group(group: ContractGroup, client: TqClient | None = None) -> dict[str, object]:
     return {
         "id": group.id,
         "name": group.name,
         "sort_order": group.sort_order,
-        "contracts": [_serialize(contract) for contract in group.contracts],
+        "contracts": [_serialize(contract, client) for contract in group.contracts],
     }
 
 
 @router.get("")
 async def list_contracts(request: Request, user_id: str = Depends(current_user_id)) -> list[dict[str, object]]:
-    return [_serialize(contract) for contract in _repo(request).list_contracts(user_id)]
+    client = getattr(request.app.state, "tq_client", None)
+    return [_serialize(contract, client) for contract in _repo(request).list_contracts(user_id)]
 
 
 @router.get("/groups")
 async def list_contract_groups(request: Request, user_id: str = Depends(current_user_id)) -> list[dict[str, object]]:
-    return [_serialize_group(group) for group in _repo(request).list_contract_groups(user_id)]
+    client = getattr(request.app.state, "tq_client", None)
+    return [_serialize_group(group, client) for group in _repo(request).list_contract_groups(user_id)]
 
 
 @router.post("/groups", status_code=201)

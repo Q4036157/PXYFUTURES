@@ -22,6 +22,7 @@ from app.market.boyi_kline import (
 from app.market.contract_catalog import to_tq_product, to_tq_symbol
 from app.market.ma_engine import Bar
 from app.services.repository import ConfigRepository, KlineSyncState
+from app.services.runtime_notices import RuntimeNoticeLimiter
 from app.services.secrets_store import get_tq_credentials
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,16 @@ _CONNECTION_NOTICE_INTERVAL_SECONDS = 15 * 60
 def _is_explicit_credential_rejection(error: BaseException) -> bool:
     error_text = str(error)
     return "invalid_grant" in error_text or "Invalid user credentials" in error_text
+
+
+def _connection_failure_message(error: BaseException) -> str:
+    """只输出故障类别，不把代理地址中的凭据或认证参数写入日志。"""
+    text = f"{type(error).__name__} {error}".lower()
+    if "proxy" in text or "代理" in text:
+        return "代理连接不可用，请检查代理程序及代理端口"
+    if "timeout" in text or "timed out" in text:
+        return "天勤连接超时，请检查网络或代理服务"
+    return "天勤连接暂时不可用，请检查网络或代理服务"
 
 
 class MarketDataUnavailable(RuntimeError):
@@ -141,6 +152,13 @@ class TqClient:
         self._live_kline_series: dict[tuple[str, int], _LiveKlineSeries] = {}
         self._credential_error: str | None = None
         self._credential_revision = 0
+        self._connect_retry_after = 0.0
+        self._connect_failures = 0
+        self._last_connect_error = "天勤连接暂时不可用"
+        self._notices = RuntimeNoticeLimiter(logger)
+        self._status_lock = Lock()
+        self._contract_states: dict[str, tuple[float, str]] = {}
+        self._excluded_symbols: frozenset[str] = frozenset()
 
     @property
     def credential_revision(self) -> int:
@@ -159,7 +177,9 @@ class TqClient:
         except Exception as exc:
             if _is_explicit_credential_rejection(exc):
                 raise TqCredentialsInvalid("天勤账号或密码错误，请重新输入") from exc
-            raise MarketDataUnavailable("天勤认证服务暂时不可用，请检查网络后重试") from exc
+            raise MarketDataUnavailable(
+                f"天勤认证服务暂时不可用：{_connection_failure_message(exc)}"
+            ) from exc
 
     def credentials_changed(self) -> None:
         """凭据成功更新后清除永久阻断，并关闭旧行情连接。"""
@@ -167,12 +187,16 @@ class TqClient:
         self._credential_error = None
         self._remote_retry_after_monotonic = 0.0
         self._credential_revision += 1
+        self._connect_retry_after = 0.0
+        self._connect_failures = 0
 
     def _get_api(self) -> object:
         if self._api is not None:
             return self._api
         if self._credential_error is not None:
             raise TqCredentialsInvalid(self._credential_error)
+        if monotonic() < self._connect_retry_after:
+            raise MarketDataUnavailable(self._last_connect_error)
         username, password = get_tq_credentials()
         username = username or settings.tq_user_name
         password = password or settings.tq_password
@@ -197,7 +221,7 @@ class TqClient:
             raise
         except MarketDataUnavailable as exc:
             record_tq_auth_state("unavailable", str(exc), "runtime")
-            logger.warning("天勤认证服务暂时不可用: %s", exc)
+            self._defer_connection(str(exc))
             raise
 
         try:
@@ -212,6 +236,9 @@ class TqClient:
             self._api = FilteredTqApi(auth=TqAuth(username, password))
             record_tq_auth_state("valid", "天勤账号认证成功，行情连接已建立", "runtime")
             logger.info("天勤账号认证成功，行情连接已建立")
+            self._connect_failures = 0
+            self._connect_retry_after = 0.0
+            self._notices.recover("connection", "天勤连接已恢复")
             return self._api
         except Exception as exc:
             if _is_explicit_credential_rejection(exc):
@@ -224,8 +251,50 @@ class TqClient:
                 "天勤账号已通过认证，但行情连接建立失败",
                 "runtime",
             )
-            logger.warning("天勤账号已通过认证，但行情连接建立失败: %s", exc)
-            raise MarketDataUnavailable("天勤连接失败，请检查账号、密码和网络") from exc
+            message = _connection_failure_message(exc)
+            self._defer_connection(message)
+            raise MarketDataUnavailable(message) from exc
+
+    def _defer_connection(self, message: str) -> None:
+        self._connect_failures = min(self._connect_failures + 1, 6)
+        delay = min(60.0, 3.0 * 2 ** (self._connect_failures - 1))
+        self._connect_retry_after = monotonic() + delay
+        self._last_connect_error = message
+        self._notices.warning("connection", "%s；%.0f秒后重试", message, delay)
+
+    def contract_status(self, symbol: str) -> str:
+        """仅读取已核实的生命周期状态，不在HTTP或预警快路径请求天勤。"""
+        with self._status_lock:
+            state = self._contract_states.get(symbol)
+            return state[1] if state else "unknown"
+
+    def _remember_contract_status(self, symbol: str, status: str) -> None:
+        with self._status_lock:
+            self._contract_states.pop(symbol, None)
+            self._contract_states[symbol] = (monotonic(), status)
+            while len(self._contract_states) > 512:
+                self._contract_states.pop(next(iter(self._contract_states)))
+
+    def _contract_expired(self, api: object, symbol: str) -> bool:
+        with self._status_lock:
+            cached = self._contract_states.get(symbol)
+        if cached and monotonic() - cached[0] < 300:
+            return cached[1] == "expired"
+        get_quote = getattr(api, "get_quote", None)
+        if not callable(get_quote):
+            return False
+        try:
+            quote = get_quote(to_tq_symbol(symbol))
+            status = ("expired" if bool(getattr(quote, "expired", False)) else
+                      "active" if getattr(quote, "ins_class", "") == "FUTURE" else "unknown")
+            self._remember_contract_status(symbol, status)
+            return status == "expired"
+        except Exception as exc:  # noqa: BLE001
+            self._notices.warning(
+                "contract-status", "合约状态暂未核实，保留原有行情流程: 类型=%s", type(exc).__name__,
+            )
+            self._remember_contract_status(symbol, "unknown")
+            return False
 
     def fetch_bars(
         self,
@@ -251,7 +320,11 @@ class TqClient:
             active_keys: list[tuple[str, int]] = []
             initialized = 0
             history_backfills = 0
+            excluded: set[str] = set()
             for job in jobs:
+                if self._contract_expired(api, job.symbol):
+                    excluded.add(job.symbol)
+                    continue
                 key = (job.symbol, job.duration_seconds)
                 active_keys.append(key)
                 sync_state = repository.get_kline_sync_state(
@@ -317,6 +390,17 @@ class TqClient:
                     latest_timestamp_ns=live_bars[-1][0] if live_bars else None,
                 )
                 initialized += 1
+
+            if frozenset(excluded) != self._excluded_symbols:
+                self._excluded_symbols = frozenset(excluded)
+                logger.info(
+                    "到期合约保留历史并退出实时订阅: 到期合约=%d 活跃基础订阅=%d",
+                    len(excluded), len(active_keys),
+                )
+            active_set = set(active_keys)
+            self._live_kline_series = {
+                key: value for key, value in self._live_kline_series.items() if key in active_set
+            }
 
             if initialized:
                 logger.info(
@@ -433,23 +517,32 @@ class TqClient:
             tq_symbol = to_tq_symbol(symbol)
             sync_state = repository.get_kline_sync_state(symbol, duration_seconds)
             cached = repository.load_kline_bars(symbol, duration_seconds, cache_count or count)
+            if self.contract_status(symbol) == "expired":
+                return self._cached_result(symbol, duration_seconds, cached, sync_state)
             if self._should_use_cache_only():
                 return self._cached_result(symbol, duration_seconds, cached, sync_state)
 
             request_count = self._request_count(duration_seconds, count, sync_state)
             try:
                 api = self._get_api()
-                frame = api.get_kline_serial(
-                    tq_symbol,
-                    duration_seconds=duration_seconds,
-                    data_length=request_count,
-                )
+                if self._contract_expired(api, symbol):
+                    return self._cached_result(symbol, duration_seconds, cached, sync_state)
+                series = self._live_kline_series.get((symbol, duration_seconds))
+                if series is not None and sync_state and sync_state.max_requested_bars >= count:
+                    frame = series.frame
+                    request_count = series.data_length
+                else:
+                    frame = api.get_kline_serial(
+                        tq_symbol, duration_seconds=duration_seconds, data_length=request_count,
+                    )
                 # get_kline_serial 会同步等待首批历史 K 线初始化完成。一个监控批次中
                 # 只需推进一次行情循环，避免十合约多周期场景把短等待累积成排队延迟。
                 if monotonic() - self._last_live_update_monotonic >= 0.2:
                     api.wait_update(deadline=time() + 0.25)
                     self._last_live_update_monotonic = monotonic()
                 remote_bars = self._remote_bars(frame)
+                if not remote_bars:
+                    raise MarketDataUnavailable("天勤未返回有效K线，保留本地历史时间")
                 synced_at_ns = time_ns()
                 repository.save_kline_bars(
                     symbol,
@@ -470,6 +563,7 @@ class TqClient:
                             count,
                             len(remote_bars),
                         )
+                self._notices.recover("kline-fetch", "天勤K线读取已恢复")
                 return MarketBars(self._bars_from_rows(cached), "live", synced_at_ns)
             except TqCredentialsInvalid:
                 if cached:
@@ -478,11 +572,12 @@ class TqClient:
             except Exception as exc:
                 self._remote_retry_after_monotonic = monotonic() + 30
                 if cached:
-                    logger.warning(
-                        "天勤 K 线读取失败，改用本地缓存: symbol=%s duration=%s error=%s",
+                    self._notices.warning(
+                        "kline-fetch",
+                        "天勤K线读取失败，改用本地缓存: symbol=%s duration=%s 类型=%s",
                         symbol,
                         duration_seconds,
-                        exc,
+                        type(exc).__name__,
                     )
                     return self._cached_result(symbol, duration_seconds, cached, sync_state)
                 logger.exception(
@@ -519,7 +614,7 @@ class TqClient:
         if cached:
             return MarketBars(
                 self._bars_from_rows(cached),
-                "cache",
+                "historical" if self.contract_status(symbol) == "expired" else "cache",
                 sync_state.last_synced_at_ns if sync_state else None,
             )
         raise MarketDataUnavailable(
@@ -544,7 +639,10 @@ class TqClient:
             if getattr(quote, "ins_class", "") != "FUTURE" or bool(
                 getattr(quote, "expired", False)
             ):
+                if bool(getattr(quote, "expired", False)):
+                    self._remember_contract_status(symbol, "expired")
                 raise ContractUnavailable(f"{symbol} 当前不存在、已下市，或不是可添加的期货合约")
+            self._remember_contract_status(symbol, "active")
             return tq_symbol
 
     def list_active_futures(self, exchange: str, product: str) -> list[str]:
