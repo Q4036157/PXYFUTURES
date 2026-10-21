@@ -228,6 +228,20 @@ class TqClient:
             notice_limiter = self._connection_notice_limiter
 
             class FilteredTqApi(TqApi):
+                def _setup_connection(self) -> None:
+                    try:
+                        super()._setup_connection()
+                    except Exception:
+                        # SDK 在此处失败时尚未进入自身的初始化清理范围。
+                        try:
+                            self.close()
+                        except Exception as cleanup_error:  # noqa: BLE001
+                            logger.error(
+                                "天勤连接初始化失败后的资源释放异常: 类型=%s",
+                                type(cleanup_error).__name__,
+                            )
+                        raise
+
                 def _print(self, msg: str = "", level: str | int = "INFO") -> None:
                     if notice_limiter.handle(msg, level):
                         return
