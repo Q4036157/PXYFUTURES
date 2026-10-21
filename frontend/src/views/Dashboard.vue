@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
+import { AlertCounter, alertEventKey, alertRowKey, mergeAlertSnapshot } from '@/lib/alertCounter'
 import alertSoundUrl from '@/assets/ok3.wav?url'
 import type {
   AlertScanResult,
@@ -83,14 +84,16 @@ const alertExcludedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
 const alertPopupBeijingTime = ref('')
-const latestAlertEventKeys = ref<Set<string>>(new Set())
+const alertCounts = ref<Record<string, number>>({})
+const contractOrderSaving = ref(false)
+let contractLoadVersion = 0
 const alertStreamConnected = ref(false)
 const notificationPermission = ref<NotificationPermission | 'unsupported'>(
   typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
 )
 const credentialStatus = ref<TqCredentialStatus | null>(null)
 const credentialsSaving = ref(false)
-const seenAlertEvents = new Set<string>()
+const alertCounter = new AlertCounter()
 const soundTimers = new Set<number>()
 const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 const ALERT_FRESHNESS_MS = 3 * 60 * 1_000
@@ -208,12 +211,8 @@ function alertText(signal: AlertSignalSnapshot): string {
   return `${signal.symbol} · ${signal.period.label} · ${alertCondition(signal)} · ${signal.label}`
 }
 
-function alertEventKey(signal: AlertSignalSnapshot): string {
-  return `${signal.contract_id}:${signal.period.duration_seconds}:${signal.cross_type}:${signal.cross_time}`
-}
-
-function isLatestAlertSignal(signal: AlertSignalSnapshot): boolean {
-  return latestAlertEventKeys.value.has(alertEventKey(signal))
+function alertCount(signal: AlertSignalSnapshot): number {
+  return alertCounts.value[alertRowKey(signal)] ?? 0
 }
 
 function isFreshAlertSignal(signal: AlertSignalSnapshot): boolean {
@@ -369,25 +368,30 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
 }
 
 function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): void {
-  alertSignals.value = data.signals
+  alertSignals.value = mergeAlertSnapshot(alertSignals.value, data.signals)
   alertFailedCount.value = data.failed
   alertExcludedCount.value = data.excluded_contracts ?? 0
-  if (!allowNotification) return
+  if (!allowNotification) {
+    alertCounts.value = Object.fromEntries(alertSignals.value.map((signal) => [alertRowKey(signal), alertCounter.count(signal)]))
+    return
+  }
 
   const selectedConditions = new Set(selectedAlertConditions.value)
   const selectedStates = new Set(selectedAlertStates.value)
-  const newSignals = data.signals.filter((signal) => {
+  const newSignals = [...alertSignals.value].sort((left, right) =>
+    Date.parse(left.cross_time ?? '') - Date.parse(right.cross_time ?? ''),
+  ).filter((signal) => {
     const condition = alertCondition(signal)
     const state = alertState(signal)
     if (selectedConditions.size && (!condition || !selectedConditions.has(condition))) return false
     if (selectedStates.size && (!state || !selectedStates.has(state))) return false
+    if (!selectedAlertDurations.value.includes(signal.period.duration_seconds)) return false
     if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
     if (!isFreshAlertSignal(signal)) return false
-    return !seenAlertEvents.has(alertEventKey(signal))
+    return alertCounter.accept(signal)
   })
-  for (const signal of newSignals) seenAlertEvents.add(alertEventKey(signal))
+  alertCounts.value = Object.fromEntries(alertSignals.value.map((signal) => [alertRowKey(signal), alertCounter.count(signal)]))
   if (newSignals.length) {
-    latestAlertEventKeys.value = new Set(newSignals.map(alertEventKey))
     showAlertNotification(newSignals)
   }
 }
@@ -674,10 +678,14 @@ function flattenContractGroups(groups: ContractGroup[]): ContractConfig[] {
   return groups.flatMap((group) => group.contracts)
 }
 
-async function loadContracts(): Promise<void> {
+async function loadContracts(allowDuringOrderSave = false): Promise<void> {
+  if (contractOrderSaving.value && !allowDuringOrderSave) return
+  const version = ++contractLoadVersion
   const { data } = await client.get<ContractGroup[]>('/contracts/groups')
+  if (version !== contractLoadVersion || (contractOrderSaving.value && !allowDuringOrderSave)) return
   contractGroups.value = data
   contracts.value = flattenContractGroups(data)
+  alertCounter.retain(new Set(contracts.value.map((contract) => JSON.stringify([contract.id, contract.symbol]))))
   if (!data.some((group) => group.id === activeGroupId.value)) {
     activeGroupId.value = data[0]?.id || null
   }
@@ -730,6 +738,10 @@ async function renameGroup(group: ContractGroup): Promise<void> {
 }
 
 function beginContractDrag(contract: ContractConfig, groupId: number, event: DragEvent): void {
+  if (contractOrderSaving.value) {
+    event.preventDefault()
+    return
+  }
   draggedContractId.value = contract.id
   draggedSourceGroupId.value = groupId
   if (event.dataTransfer) {
@@ -766,14 +778,28 @@ async function dropContract(group: ContractGroup, index: number): Promise<void> 
   const contractId = draggedContractId.value
   const sourceGroupId = draggedSourceGroupId.value
   finishContractDrag()
-  if (!contractId || !sourceGroupId) return
+  if (!contractId || !sourceGroupId || contractOrderSaving.value) return
+  await moveContractTo(contractId, sourceGroupId, group.id, index)
+}
+
+async function moveContract(group: ContractGroup, index: number, direction: -1 | 1): Promise<void> {
+  if (contractOrderSaving.value || index + direction < 0 || index + direction >= group.contracts.length) return
+  const contract = group.contracts[index]
+  if (contract) await moveContractTo(contract.id, group.id, group.id, index + (direction === 1 ? 2 : -1))
+}
+
+async function moveContractTo(contractId: number, sourceGroupId: number, targetGroupId: number, index: number): Promise<void> {
   const sourceGroup = contractGroups.value.find((item) => item.id === sourceGroupId)
-  const targetGroup = contractGroups.value.find((item) => item.id === group.id)
+  const targetGroup = contractGroups.value.find((item) => item.id === targetGroupId)
   if (!sourceGroup || !targetGroup) return
   const sourceIndex = sourceGroup.contracts.findIndex((item) => item.id === contractId)
   if (sourceIndex < 0) return
+  if (sourceGroup.id === targetGroup.id && (index === sourceIndex || index === sourceIndex + 1)) return
+  const originalGroups = contractGroups.value.map((item) => ({ ...item, contracts: item.contracts.map((contract) => ({ ...contract })) }))
   const [moved] = sourceGroup.contracts.splice(sourceIndex, 1)
   if (!moved) return
+  contractOrderSaving.value = true
+  contractLoadVersion += 1
   if (sourceGroup.id === targetGroup.id && sourceIndex < index) index -= 1
   moved.group_id = targetGroup.id
   targetGroup.contracts.splice(Math.max(0, index), 0, moved)
@@ -790,8 +816,12 @@ async function dropContract(group: ContractGroup, index: number): Promise<void> 
       contract_ids: targetGroup.contracts.map((item) => item.id),
     })
   } catch (error: any) {
-    await loadContracts()
+    contractGroups.value = originalGroups
+    contracts.value = flattenContractGroups(originalGroups)
+    await loadContracts(true).catch(() => { errorText.value = '重新加载合约失败，请刷新页面核对顺序' })
     ElMessage.error(error.response?.data?.detail || '保存合约顺序失败')
+  } finally {
+    contractOrderSaving.value = false
   }
 }
 
@@ -1178,8 +1208,8 @@ onBeforeUnmount(() => {
             <header class="contract-group-header">
               <span class="group-name" :title="activeGroup.name">{{ activeGroup.name }}</span>
               <div class="group-actions">
-                <el-button :icon="Plus" text title="向该分组添加合约" aria-label="向该分组添加合约" @click.stop="openAddContract(activeGroup.id)" />
-                <el-button :icon="EditPen" text title="重命名分组" aria-label="重命名分组" @click.stop="renameGroup(activeGroup)" />
+                <el-button :icon="Plus" text title="向该分组添加合约" aria-label="向该分组添加合约" :disabled="contractOrderSaving" @click.stop="openAddContract(activeGroup.id)" />
+                <el-button :icon="EditPen" text title="重命名分组" aria-label="重命名分组" :disabled="contractOrderSaving" @click.stop="renameGroup(activeGroup)" />
               </div>
             </header>
             <div class="contract-group-list" @dragover="allowContractDrop" @drop="dropContract(activeGroup, activeGroup.contracts.length)">
@@ -1189,7 +1219,7 @@ onBeforeUnmount(() => {
                 class="contract-row"
                 :class="{ active: contract.id === selectedId, dragging: contract.id === draggedContractId, historical: contract.market_status === 'expired' }"
                 :title="contract.market_status === 'expired' ? '已到期，仅保留历史查看，已退出实时监控' : contract.name"
-                draggable="true"
+                :draggable="!contractOrderSaving"
                 @click="selectContract(contract.id)"
                 @dragstart="beginContractDrag(contract, activeGroup.id, $event)"
                 @dragend="finishContractDrag"
@@ -1197,10 +1227,15 @@ onBeforeUnmount(() => {
                 @drop.stop="dropContract(activeGroup, index)"
               >
                 <span class="contract-code"><small>{{ contract.exchange }}</small><strong>{{ displayContractCode(contract.code) }}</strong><span v-if="contract.market_status === 'expired'" class="contract-expiry-tag">到期</span></span>
-                <span class="contract-actions"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></span>
+                <span class="contract-actions" @dragstart.prevent>
+                  <el-button :icon="ArrowUp" text title="上移" aria-label="上移合约" :disabled="contractOrderSaving || index === 0" @click.stop="moveContract(activeGroup, index, -1)" />
+                  <el-button :icon="ArrowDown" text title="下移" aria-label="下移合约" :disabled="contractOrderSaving || index === activeGroup.contracts.length - 1" @click.stop="moveContract(activeGroup, index, 1)" />
+                  <el-button :icon="EditPen" text aria-label="更换合约" :disabled="contractOrderSaving" @click.stop="openContractEdit(contract)" />
+                  <el-button :icon="Delete" text type="danger" aria-label="删除该合约" :disabled="contractOrderSaving" @click.stop="removeContract(contract)" />
+                </span>
               </div>
               <p v-if="!activeGroup.contracts.length" class="group-empty">该分组暂无合约</p>
-              <button type="button" class="group-add-contract" @click.stop="openAddContract(activeGroup.id)"><el-icon><Plus /></el-icon>添加合约</button>
+              <button type="button" class="group-add-contract" :disabled="contractOrderSaving" @click.stop="openAddContract(activeGroup.id)"><el-icon><Plus /></el-icon>添加合约</button>
             </div>
           </article>
         </div>
@@ -1249,7 +1284,7 @@ onBeforeUnmount(() => {
           <div class="alert-control-row"><strong>预警周期</strong><div class="alert-options"><button v-for="period in commonPeriods" :key="period.durationSeconds" type="button" :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }" :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)" @click="toggleAlertDuration(period.durationSeconds)">{{ period.label }}</button></div></div>
           <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="selectedAlertConditions.includes(condition)" @click="toggleAlertCondition(condition)">{{ condition }}</button></div></div>
           <div class="alert-control-row states"><strong>状态条件</strong><div class="alert-options"><button v-for="state in alertStateOptions" :key="state" type="button" :class="{ active: selectedAlertStates.includes(state) }" :aria-pressed="selectedAlertStates.includes(state)" @click="toggleAlertState(state)">{{ state }}</button></div></div>
-          <div class="alert-results"><div v-if="matchingAlertSignals.length" class="alert-result-grid"><div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item"><span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="isLatestAlertSignal(signal)" class="alert-new-badge">NEW</span></div></div><div v-else class="alert-empty">{{ alertStatusText }}</div></div>
+          <div class="alert-results"><div v-if="matchingAlertSignals.length" class="alert-result-grid"><div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item"><span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" title="本页监测期间，该合约和周期的有效新信号累计次数；重复推送不累计">+{{ alertCount(signal) }}</span></div></div><div v-else class="alert-empty">{{ alertStatusText }}</div></div>
           <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
         </div>
       </section>

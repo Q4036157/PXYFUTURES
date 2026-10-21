@@ -132,7 +132,7 @@ class ConfigRepository:
             contracts = conn.execute(
                 """SELECT id, symbol, name, group_id, sort_order
                    FROM contracts WHERE user_id = ?
-                   ORDER BY group_id, sort_order, symbol, id""",
+                   ORDER BY group_id, sort_order, id""",
                 (user_id,),
             ).fetchall()
             return [self._contract_from_row(conn, row) for row in contracts]
@@ -150,7 +150,7 @@ class ConfigRepository:
                         for row in conn.execute(
                             """SELECT id, symbol, name, group_id, sort_order
                                FROM contracts WHERE user_id = ? AND group_id = ?
-                               ORDER BY sort_order, symbol, id""",
+                               ORDER BY sort_order, id""",
                             (user_id, group["id"]),
                         ).fetchall()
                     ],
@@ -188,7 +188,7 @@ class ConfigRepository:
                 for contract in conn.execute(
                     """SELECT id, symbol, name, group_id, sort_order
                        FROM contracts WHERE user_id = ? AND group_id = ?
-                       ORDER BY sort_order, symbol, id""",
+                       ORDER BY sort_order, id""",
                     (user_id, group_id),
                 ).fetchall()
             ]
@@ -469,7 +469,7 @@ class ConfigRepository:
             ).fetchall()
         first_group_id = int(groups[0]["id"])
         unassigned = conn.execute(
-            "SELECT id FROM contracts WHERE user_id = ? AND group_id IS NULL ORDER BY symbol, id",
+            "SELECT id FROM contracts WHERE user_id = ? AND group_id IS NULL ORDER BY id",
             (user_id,),
         ).fetchall()
         if unassigned:
