@@ -27,6 +27,7 @@ type PanelSize = { width?: number; height?: number }
 const contracts = ref<ContractConfig[]>([])
 const contractGroups = ref<ContractGroup[]>([])
 const activeGroupId = ref<number | null>(null)
+const activeGroup = computed(() => contractGroups.value.find((group) => group.id === activeGroupId.value))
 const selectedId = ref<number | null>(null)
 const signals = ref<SignalSnapshot[]>([])
 const periodNotes = ref<Record<number, string>>({})
@@ -698,6 +699,20 @@ function allowContractDrop(event: DragEvent): void {
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
 }
 
+function navigateGroupTabs(event: KeyboardEvent, index: number): void {
+  const count = contractGroups.value.length
+  let nextIndex: number
+  if (event.key === 'ArrowRight') nextIndex = (index + 1) % count
+  else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + count) % count
+  else if (event.key === 'Home') nextIndex = 0
+  else if (event.key === 'End') nextIndex = count - 1
+  else return
+  event.preventDefault()
+  activeGroupId.value = contractGroups.value[nextIndex]!.id
+  const tabs = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('[role=tab]')
+  tabs?.[nextIndex]?.focus()
+}
+
 async function dropContract(group: ContractGroup, index: number): Promise<void> {
   const contractId = draggedContractId.value
   const sourceGroupId = draggedSourceGroupId.value
@@ -714,6 +729,7 @@ async function dropContract(group: ContractGroup, index: number): Promise<void> 
   moved.group_id = targetGroup.id
   targetGroup.contracts.splice(Math.max(0, index), 0, moved)
   contracts.value = flattenContractGroups(contractGroups.value)
+  activeGroupId.value = targetGroup.id
   try {
     if (sourceGroup.id !== targetGroup.id) {
       await client.put(`/contracts/${contractId}/group`, { group_id: targetGroup.id })
@@ -1084,34 +1100,55 @@ onBeforeUnmount(() => {
           <button type="button" class="panel-toggle" @click="togglePanel('groups')">{{ collapsedPanels.groups ? '展开' : '折叠' }}</button>
         </header>
         <div v-if="!collapsedPanels.groups" class="group-columns">
-          <article v-for="group in contractGroups" :key="group.id" class="contract-group" :class="{ active: group.id === activeGroupId }" @click="activeGroupId = group.id">
+          <div class="group-tabs" role="tablist" aria-label="合约分组">
+            <button
+              v-for="(group, index) in contractGroups"
+              :id="`group-tab-${group.id}`"
+              :key="group.id"
+              type="button"
+              class="group-tab"
+              role="tab"
+              :class="{ active: group.id === activeGroupId }"
+              :aria-selected="group.id === activeGroupId"
+              :aria-controls="`group-panel-${group.id}`"
+              :aria-label="`分组 ${index + 1}：${group.name}`"
+              :tabindex="group.id === activeGroupId ? 0 : -1"
+              :title="`${group.name} · 拖入合约可移到此组`"
+              @click="activeGroupId = group.id"
+              @keydown="navigateGroupTabs($event, index)"
+              @dragover="allowContractDrop"
+              @drop.prevent="dropContract(group, group.contracts.length)"
+            >{{ index + 1 }}</button>
+            <button type="button" class="group-tab group-tab-add" title="添加分组" aria-label="添加分组" @click="createGroup"><el-icon><Plus /></el-icon></button>
+          </div>
+          <article v-if="activeGroup" :id="`group-panel-${activeGroup.id}`" :key="activeGroup.id" class="contract-group active" role="tabpanel" :aria-labelledby="`group-tab-${activeGroup.id}`">
             <header class="contract-group-header">
-              <button type="button" class="group-name" @click.stop="activeGroupId = group.id">{{ group.name }}</button>
+              <span class="group-name" :title="activeGroup.name">{{ activeGroup.name }}</span>
               <div class="group-actions">
-                <el-button :icon="Plus" text title="向该分组添加合约" @click.stop="openAddContract(group.id)" />
-                <el-button :icon="EditPen" text title="重命名分组" @click.stop="renameGroup(group)" />
+                <el-button :icon="Plus" text title="向该分组添加合约" aria-label="向该分组添加合约" @click.stop="openAddContract(activeGroup.id)" />
+                <el-button :icon="EditPen" text title="重命名分组" aria-label="重命名分组" @click.stop="renameGroup(activeGroup)" />
               </div>
             </header>
-            <div class="contract-group-list" @dragover="allowContractDrop" @drop="dropContract(group, group.contracts.length)">
+            <div class="contract-group-list" @dragover="allowContractDrop" @drop="dropContract(activeGroup, activeGroup.contracts.length)">
               <div
-                v-for="(contract, index) in group.contracts"
+                v-for="(contract, index) in activeGroup.contracts"
                 :key="contract.id"
                 class="contract-row"
                 :class="{ active: contract.id === selectedId, dragging: contract.id === draggedContractId }"
                 draggable="true"
                 @click="selectContract(contract.id)"
-                @dragstart="beginContractDrag(contract, group.id, $event)"
+                @dragstart="beginContractDrag(contract, activeGroup.id, $event)"
                 @dragend="finishContractDrag"
                 @dragover="allowContractDrop"
-                @drop.stop="dropContract(group, index)"
+                @drop.stop="dropContract(activeGroup, index)"
               >
                 <span class="contract-code"><small>{{ contract.exchange }}</small><strong>{{ displayContractCode(contract.code) }}</strong></span>
                 <span class="contract-actions"><el-button :icon="EditPen" text aria-label="更换合约" @click.stop="openContractEdit(contract)" /><el-button :icon="Delete" text type="danger" aria-label="删除该合约" @click.stop="removeContract(contract)" /></span>
               </div>
-              <button type="button" class="group-add-contract" @click.stop="openAddContract(group.id)"><el-icon><Plus /></el-icon>添加合约</button>
+              <p v-if="!activeGroup.contracts.length" class="group-empty">该分组暂无合约</p>
+              <button type="button" class="group-add-contract" @click.stop="openAddContract(activeGroup.id)"><el-icon><Plus /></el-icon>添加合约</button>
             </div>
           </article>
-          <button type="button" class="add-group-card" @click="createGroup"><el-icon><Plus /></el-icon><span>添加分组</span></button>
         </div>
       </aside>
 
