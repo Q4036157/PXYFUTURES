@@ -99,3 +99,21 @@ button { font: inherit; }
 .monitor-section { display: flex; flex-direction: column; gap: 16px; width: min(1240px, calc(100% - 48px)); min-height: 0; margin: 16px auto 0; }.signal-area { position: static; width: 100%; padding: 0; overflow: auto; background: #fff; border: 1px solid var(--pxy-border); border-radius: var(--pxy-radius); box-shadow: 0 14px 30px rgb(16 36 38 / 5%); }.signal-panel-header { background: #fff; }.signal-area > div:not(.panel-header) { padding: 0 12px 12px; }.signal-area .signal-table { width: 100%; min-width: 820px; margin-top: 12px; }.signal-area .ma-footer { width: 100%; min-width: 820px; }.alert-center { width: 100%; min-width: 0; margin-top: 0; resize: both; }.alert-header-actions { display: flex; align-items: center; gap: 12px; }.alert-center-header .panel-toggle { color: #a9c9bd; border-color: #51766d; }.alert-center-header .panel-toggle:hover { color: var(--pxy-deep); }.alert-center.collapsed { min-height: 68px; height: auto !important; }.alert-center.collapsed .alert-center-header { border-bottom: 0; }.alert-control-row.states { background: rgb(185 240 220 / 3%); }.alert-options button.active { box-shadow: 0 0 0 1px rgb(255 255 255 / 12%) inset; }
 @media (max-width: 960px) { .setup-section { grid-template-columns: minmax(320px, .9fr) minmax(0, 1.5fr); }.setup-details-content { grid-template-columns: 125px minmax(0, 1fr); gap: 10px; } }
 @media (max-width: 720px) { .setup-section { grid-template-columns: 1fr; width: calc(100% - 24px); margin-top: 12px; padding: 12px; }.group-columns { padding: 10px; }.setup-details-content { grid-template-columns: 1fr; }.setup-details-content .contract-ident { min-height: 0; }.monitor-section { width: calc(100% - 24px); margin-top: 12px; }.signal-area .panel-header, .alert-center-header { position: sticky; left: 0; }.alert-header-actions { gap: 7px; }.alert-status { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
+
+/* 合约纵向占据左侧，周期设置、均线信号与预警共用右侧工作区。 */
+.workspace-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); align-items: start; gap: 16px; width: min(1240px, calc(100% - 48px)); margin: 26px auto 0; }
+.workspace-layout > .contract-groups-panel { position: sticky; top: 88px; width: 100%; min-width: 0; max-height: calc(100vh - 104px); resize: vertical; }
+.workspace-layout .contract-groups-header { position: sticky; z-index: 1; top: 0; }
+.workspace-layout .contract-groups-header > div { display: block; }
+.workspace-layout .group-columns { flex-direction: column; gap: 10px; padding: 10px; overflow: visible; }
+.workspace-layout .contract-group { flex: 0 0 auto; width: 100%; }
+.workspace-layout .contract-group-list { max-height: none; }
+.workspace-layout .add-group-card { flex: 0 0 auto; min-height: 34px; }
+.workspace-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.workspace-main .setup-section { display: block; width: 100%; margin: 0; padding: 0; background: transparent; border: 0; box-shadow: none; }
+.workspace-main .setup-details-content { display: block; }
+.workspace-main .setup-table { min-width: 520px; }
+.workspace-main .setup-table th, .workspace-main .setup-table td { white-space: nowrap; }
+.workspace-main .monitor-section { width: 100%; margin: 0; }
+@media (max-width: 960px) { .workspace-layout { grid-template-columns: 200px minmax(0, 1fr); width: calc(100% - 28px); } }
+@media (max-width: 720px) { .workspace-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 24px); margin-top: 12px; }.workspace-layout > .contract-groups-panel { position: static; max-height: 360px; }.workspace-main .setup-details-panel .panel-header > div { flex-wrap: wrap; gap: 4px 9px; } }

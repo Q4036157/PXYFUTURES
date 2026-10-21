@@ -103,7 +103,7 @@ const platformReturnVisible = window.location.pathname === '/futures-app'
   || window.self !== window.top
 
 const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡']
-const panelLayoutKey = 'pxy-futures-panel-layout-v2'
+const panelLayoutKey = 'pxy-futures-panel-layout-v3'
 const collapsedPanels = ref<Record<PanelKey, boolean>>({
   groups: false,
   setup: false,
@@ -757,6 +757,7 @@ function persistPanelLayout(): void {
 function loadPanelLayout(): void {
   try {
     localStorage.removeItem('pxy-futures-panel-layout-v1')
+    localStorage.removeItem('pxy-futures-panel-layout-v2')
     const saved = JSON.parse(localStorage.getItem(panelLayoutKey) || '{}') as {
       collapsed?: Partial<Record<PanelKey, boolean>>
       sizes?: Partial<Record<PanelKey, PanelSize>>
@@ -1076,8 +1077,8 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section class="setup-section">
-      <div ref="groupsPanelRef" class="contract-groups-panel resizable-panel" :class="{ collapsed: collapsedPanels.groups }" :style="panelStyle('groups')">
+    <div class="workspace-layout">
+      <aside ref="groupsPanelRef" class="contract-groups-panel resizable-panel" :class="{ collapsed: collapsedPanels.groups }" :style="panelStyle('groups')" aria-label="交易合约列表">
         <header class="panel-header contract-groups-header">
           <div><h2>交易合约</h2><span>WATCHLIST · 拖动调整顺序</span></div>
           <button type="button" class="panel-toggle" @click="togglePanel('groups')">{{ collapsedPanels.groups ? '展开' : '折叠' }}</button>
@@ -1112,18 +1113,16 @@ onBeforeUnmount(() => {
           </article>
           <button type="button" class="add-group-card" @click="createGroup"><el-icon><Plus /></el-icon><span>添加分组</span></button>
         </div>
-      </div>
+      </aside>
 
+      <div class="workspace-main">
+      <section class="setup-section">
       <div ref="setupPanelRef" class="setup-details-panel resizable-panel" :class="{ collapsed: collapsedPanels.setup }" :style="panelStyle('setup')">
         <header class="panel-header">
-          <div><span>当前合约设置</span><strong v-if="selectedContract">{{ displayContractCode(selectedContract.code) }}</strong></div>
+          <div><span>当前合约设置</span><span v-if="selectedContract">{{ selectedContract.exchange }}</span><strong v-if="selectedContract">{{ displayContractCode(selectedContract.code) }}</strong></div>
           <button type="button" class="panel-toggle" @click="togglePanel('setup')">{{ collapsedPanels.setup ? '展开' : '折叠' }}</button>
         </header>
         <div v-if="!collapsedPanels.setup" class="setup-details-content">
-          <div v-if="selectedContract" class="contract-ident">
-            <span>交易所</span><strong>{{ selectedContract.exchange }}</strong>
-            <span>交易合约</span><strong>{{ displayContractCode(selectedContract.code) }}</strong>
-          </div>
           <div v-if="selectedContract" class="setup-table-wrap">
             <table class="setup-table"><thead><tr><th>周期设置</th><th>M4设置</th><th>M3设置</th><th>M2设置</th><th>M1设置</th><th></th></tr></thead><tbody>
               <tr v-for="period in selectedContract.periods" :key="period.duration_seconds"><td>{{ period.label }}</td><td>{{ period.m4 }}</td><td>{{ period.m3 }}</td><td>{{ period.m2 }}</td><td>{{ period.m1 }}</td><td class="row-actions"><el-button :icon="EditPen" text title="编辑周期" @click="openPeriod(period)" /><el-button :icon="Delete" text type="danger" title="删除周期" @click="removePeriod(period)" /></td></tr>
@@ -1163,6 +1162,9 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </section>
+
+      </div>
+    </div>
 
     <Transition name="alert-popup">
       <aside v-if="alertPopupVisible" class="market-alert-popup" role="alert" aria-live="assertive">
