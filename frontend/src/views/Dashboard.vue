@@ -103,7 +103,7 @@ const platformReturnVisible = window.location.pathname === '/futures-app'
   || window.self !== window.top
 
 const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡']
-const panelLayoutKey = 'pxy-futures-panel-layout-v1'
+const panelLayoutKey = 'pxy-futures-panel-layout-v2'
 const collapsedPanels = ref<Record<PanelKey, boolean>>({
   groups: false,
   setup: false,
@@ -744,23 +744,47 @@ function panelStyle(panel: PanelKey): Record<string, string> {
 }
 
 function persistPanelLayout(): void {
-  localStorage.setItem(panelLayoutKey, JSON.stringify({
-    collapsed: collapsedPanels.value,
-    sizes: panelSizes.value,
-  }))
+  try {
+    localStorage.setItem(panelLayoutKey, JSON.stringify({
+      collapsed: collapsedPanels.value,
+      sizes: panelSizes.value,
+    }))
+  } catch {
+    // 浏览器禁用存储或空间不足时，仍允许调整当前页面。
+  }
 }
 
 function loadPanelLayout(): void {
   try {
+    localStorage.removeItem('pxy-futures-panel-layout-v1')
     const saved = JSON.parse(localStorage.getItem(panelLayoutKey) || '{}') as {
       collapsed?: Partial<Record<PanelKey, boolean>>
       sizes?: Partial<Record<PanelKey, PanelSize>>
     }
-    collapsedPanels.value = { ...collapsedPanels.value, ...(saved.collapsed || {}) }
-    panelSizes.value = { ...panelSizes.value, ...(saved.sizes || {}) }
+    for (const panel of Object.keys(panelRefs) as PanelKey[]) {
+      const collapsed = saved?.collapsed?.[panel]
+      if (typeof collapsed === 'boolean') collapsedPanels.value[panel] = collapsed
+      const size = saved?.sizes?.[panel]
+      for (const dimension of ['width', 'height'] as const) {
+        const value = size?.[dimension]
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          panelSizes.value[panel][dimension] = Math.round(value)
+        }
+      }
+    }
   } catch {
-    localStorage.removeItem(panelLayoutKey)
+    // 缓存损坏或无法访问时，使用默认自适应布局。
   }
+}
+
+function resetPanelLayout(): void {
+  for (const panel of Object.keys(panelRefs) as PanelKey[]) {
+    collapsedPanels.value[panel] = false
+    panelSizes.value[panel] = {}
+    panelRefs[panel].value?.style.removeProperty('width')
+    panelRefs[panel].value?.style.removeProperty('height')
+  }
+  persistPanelLayout()
 }
 
 function observePanelSizes(): void {
@@ -771,9 +795,13 @@ function observePanelSizes(): void {
       const panel = (Object.entries(panelRefs) as [PanelKey, { value: HTMLElement | null }][])
         .find(([, panelRef]) => panelRef.value === entry.target)?.[0]
       if (!panel || collapsedPanels.value[panel]) continue
-      const width = Math.round(entry.contentRect.width)
-      const height = Math.round(entry.contentRect.height)
-      if (width < 80 || height < 60) continue
+      const element = entry.target as HTMLElement
+      // 原生拖动写入的像素尺寸包含边框；不回写内容区或自动布局尺寸。
+      const width = element.style.width.endsWith('px')
+        ? Math.round(Number.parseFloat(element.style.width)) : undefined
+      const height = element.style.height.endsWith('px')
+        ? Math.round(Number.parseFloat(element.style.height)) : undefined
+      if (width === undefined && height === undefined) continue
       const previous = panelSizes.value[panel]
       if (previous.width !== width || previous.height !== height) {
         panelSizes.value[panel] = { width, height }
@@ -783,7 +811,7 @@ function observePanelSizes(): void {
     if (changed) persistPanelLayout()
   })
   for (const panelRef of Object.values(panelRefs)) {
-    if (panelRef.value) panelResizeObserver.observe(panelRef.value)
+    if (panelRef.value) panelResizeObserver.observe(panelRef.value, { box: 'border-box' })
   }
 }
 
@@ -1041,6 +1069,7 @@ onBeforeUnmount(() => {
           <el-icon><Back /></el-icon>
           <span>返回平台主页</span>
         </a>
+        <el-button plain @click="resetPanelLayout">恢复布局</el-button>
         <el-button :icon="Refresh" :loading="refreshing" plain @click="refreshSignals(true)">更新数据</el-button>
         <el-button :icon="Setting" plain @click="openCredentials">天勤账号</el-button>
         <el-button type="primary" :icon="Plus" @click="openAddContract()">添加合约</el-button>
