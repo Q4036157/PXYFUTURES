@@ -18,7 +18,11 @@ async function main() {
   const state = structuredClone(fixture), errors = [], orderRequests = [], results = []
   let sockets = [], scanSignals = [], failOrder = false, releaseOrder = null, holdOrder = false
   page.on('pageerror', error => errors.push(error.message))
-  await page.addInitScript(() => localStorage.setItem('pxy-futures-alert-preferences-v1', JSON.stringify({ durations: [300, 600], conditions: [], states: [] })))
+  await page.addInitScript(() => {
+    if (!localStorage.getItem('pxy-futures-alert-preferences-v1')) {
+      localStorage.setItem('pxy-futures-alert-preferences-v1', JSON.stringify({ durations: [300, 600], conditions: [], states: [] }))
+    }
+  })
   await page.routeWebSocket('**/*', socket => { sockets.push(socket); socket.onMessage(() => {}) })
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url()), parts = url.pathname.split('/'), last = parts.at(-1), method = request.method()
@@ -128,9 +132,10 @@ async function main() {
     const other = signal(2, fixture[0].contracts[1]), otherPeriod = signal(0, fixture[0].contracts[0], periods[1])
     await send([next, other, otherPeriod])
     assert.deepEqual((await page.locator('.alert-new-badge').allTextContents()).sort(), ['+1', '+1', '+2'])
-    const newestRow = await page.locator('.alert-result-text').first().textContent()
-    assert.equal(newestRow.includes('CZCE.AP701'), true, `最近触发的行没有置顶：${newestRow}`)
-    results.push('最新进入预警状态的行排在较早的+2之前')
+    assert.deepEqual(await page.locator('.alert-period-heading > span').allTextContents(), ['10分钟', '5分钟'])
+    assert.deepEqual(await page.getByRole('region', { name: '5分钟预警', exact: true }).locator('.alert-new-badge').allTextContents(), ['+1', '+2'])
+    assert.equal((await page.locator('.alert-result-text').first().textContent()).includes('10分钟'), true)
+    results.push('周期从大到小分组，组内+1排在+2之前')
     await closePopup()
     sockets.at(-1).close({ code: 1000 })
     await page.waitForTimeout(1500)
@@ -147,9 +152,52 @@ async function main() {
     await send([next, other, otherPeriod])
     assert.deepEqual((await page.locator('.alert-new-badge').allTextContents()).sort(), ['+1', '+1', '+2'])
     results.push('历史行情、无交叉与未选周期不触发或增加计数')
+    const alertPanel = page.getByRole('region', { name: '全品种预警', exact: true })
+    await alertPanel.getByRole('button', { name: '5分钟', exact: true }).click()
+    for (const label of ['30分钟', '15分钟', '3分钟']) {
+      await alertPanel.getByRole('button', { name: label, exact: true }).click()
+    }
+    const groupPeriod = minutes => ({ ...periods[0], label: `${minutes}分钟`, duration_seconds: minutes * 60 })
+    const groupSignal = (minutes, count, contractIndex, time) => ({
+      ...signal(time, state[0].contracts[contractIndex], groupPeriod(minutes)),
+      state_bar_count: count,
+    })
+    const groupedSignals = [
+      groupSignal(3, 1, 0, 30), groupSignal(30, 10, 0, 20),
+      groupSignal(15, 2, 1, 40), groupSignal(30, 2, 1, 19),
+      groupSignal(30, 500, 2, 25), groupSignal(30, 1, 3, 18),
+      groupSignal(3, 3, 1, 29),
+    ]
+    await send(groupedSignals)
+    assert.deepEqual(await page.locator('.alert-period-heading > span').allTextContents(), ['30分钟', '15分钟', '10分钟', '3分钟'])
+    const thirtyGroup = page.getByRole('region', { name: '30分钟预警', exact: true })
+    assert.deepEqual(await thirtyGroup.locator('.alert-new-badge').allTextContents(), ['+1', '+2', '+10', '+500'])
+    assert.equal(await page.getByRole('region', { name: '15分钟预警', exact: true }).locator('.alert-result-item').count(), 1)
+    assert.equal(await page.getByRole('region', { name: '10分钟预警', exact: true }).locator('.alert-period-empty').textContent(), '暂无匹配预警')
+    assert.deepEqual(await page.getByRole('region', { name: '3分钟预警', exact: true }).locator('.alert-new-badge').allTextContents(), ['+1', '+3'])
+    const borders = await page.locator('.alert-period-heading').evaluateAll(headings => headings.map(heading => {
+      const style = getComputedStyle(heading)
+      return { width: parseFloat(style.borderTopWidth), color: style.borderTopColor }
+    }))
+    assert.ok(borders.every(border => border.width >= 2 && border.color === 'rgb(255, 138, 91)'), '每个选中周期应有彩色分隔线')
+    await alertPanel.getByRole('button', { name: '多多死叉', exact: true }).click()
+    assert.equal(await page.locator('.alert-result-item').count(), 0)
+    assert.equal(await page.locator('.alert-period-empty').count(), 4)
+    await alertPanel.getByRole('button', { name: '多多死叉', exact: true }).click()
+    await alertPanel.getByRole('button', { name: '15分钟', exact: true }).click()
+    assert.deepEqual(await page.locator('.alert-period-heading > span').allTextContents(), ['30分钟', '10分钟', '3分钟'])
+    await alertPanel.getByRole('button', { name: '15分钟', exact: true }).click()
+    await send([...groupedSignals].reverse())
+    assert.deepEqual(await thirtyGroup.locator('.alert-new-badge').allTextContents(), ['+1', '+2', '+10', '+500'])
+    await page.reload()
+    await page.waitForSelector('.alert-new-badge')
+    assert.deepEqual(await page.locator('.alert-period-heading > span').allTextContents(), ['30分钟', '15分钟', '10分钟', '3分钟'])
+    assert.deepEqual(await thirtyGroup.locator('.alert-new-badge').allTextContents(), ['+1', '+2', '+10', '+500'])
+    results.push('多周期分隔、数值排序含+500、空组、筛选、取消选择、乱序推送和刷新恢复')
     state[0].contracts.push({ ...fixture[0].contracts[0], id: 5, exchange: 'DCE', code: 'PVC2609', symbol: 'DCE.pvc2609', name: 'PVC2609', market_status: 'expired', sort_order: 4 })
     await page.reload()
     await page.waitForSelector('.contract-expiry-tag')
+    await page.waitForSelector('.alert-new-badge')
     const screenshotDir = process.env.PXY_SCREENSHOT_DIR || require('node:os').tmpdir()
     for (const width of [1440, 1024, 960, 721, 720, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 })
@@ -169,6 +217,18 @@ async function main() {
       })))
       assert.ok(bounds.every(item => item.fits && item.codeWidth > 30 && item.codeFits), `合约代码或按钮挤压：${width}`)
       assert.ok(bounds.every(item => item.singleLine), `交易所与合约代码未在同一行：${width}`)
+      const alertLayout = await page.locator('.alert-period-group').evaluateAll(groups => groups.map(group => {
+        const grid = group.querySelector('.alert-result-grid')
+        const rows = [...group.querySelectorAll('.alert-result-item')]
+        return {
+          columns: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : null,
+          singleLine: rows.every(row => getComputedStyle(row).whiteSpace === 'nowrap'),
+          badgesFit: rows.every(row => row.querySelector('.alert-new-badge').getBoundingClientRect().right <= row.getBoundingClientRect().right + 1),
+          endsBeforeNext: !group.nextElementSibling || group.getBoundingClientRect().bottom <= group.nextElementSibling.getBoundingClientRect().top + 1,
+        }
+      }))
+      assert.ok(alertLayout.every(group => group.singleLine && group.badgesFit && group.endsBeforeNext), `周期组或计数布局异常：${width}`)
+      assert.ok(alertLayout.every(group => group.columns === null || group.columns === (width <= 720 ? 1 : 2)), `周期组列数异常：${width}`)
       if ([1440, 390].includes(width)) await page.screenshot({ path: path.join(screenshotDir, `pxyfutures-sort-count-${width}.png`), fullPage: true })
     }
     assert.deepEqual(errors, [])

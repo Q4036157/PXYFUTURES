@@ -174,18 +174,25 @@ const matchingAlertSignals = computed(() => {
       return durations.has(signal.period.duration_seconds) && matchesCondition && matchesState
     })
     .sort((left, right) => {
+      const durationOrder = right.period.duration_seconds - left.period.duration_seconds
+      if (durationOrder) return durationOrder
+      const countOrder = (left.state_bar_count || Number.MAX_SAFE_INTEGER)
+        - (right.state_bar_count || Number.MAX_SAFE_INTEGER)
+      if (countOrder) return countOrder
       const latestEntryFirst = Date.parse(right.state_since ?? '') - Date.parse(left.state_since ?? '')
       if (Number.isFinite(latestEntryFirst) && latestEntryFirst !== 0) return latestEntryFirst
-      const longerStateFirst = right.state_bar_count - left.state_bar_count
-      if (longerStateFirst) return longerStateFirst
-      const durationOrder = commonPeriods.findIndex(
-        (period) => period.durationSeconds === left.period.duration_seconds,
-      ) - commonPeriods.findIndex(
-        (period) => period.durationSeconds === right.period.duration_seconds,
-      )
-      return durationOrder || left.symbol.localeCompare(right.symbol)
+      return left.symbol.localeCompare(right.symbol)
     })
 })
+
+const alertPeriodGroups = computed(() => commonPeriods
+  .filter((period) => selectedAlertDurations.value.includes(period.durationSeconds))
+  .map((period) => ({
+    ...period,
+    signals: matchingAlertSignals.value.filter(
+      (signal) => signal.period.duration_seconds === period.durationSeconds,
+    ),
+  })))
 
 const alertStatusText = computed(() => {
   if (!selectedAlertDurations.value.length) {
@@ -1283,7 +1290,18 @@ onBeforeUnmount(() => {
           <div class="alert-control-row"><strong>预警周期</strong><div class="alert-options"><button v-for="period in commonPeriods" :key="period.durationSeconds" type="button" :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }" :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)" @click="toggleAlertDuration(period.durationSeconds)">{{ period.label }}</button></div></div>
           <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="selectedAlertConditions.includes(condition)" @click="toggleAlertCondition(condition)">{{ condition }}</button></div></div>
           <div class="alert-control-row states"><strong>状态条件</strong><div class="alert-options"><button v-for="state in alertStateOptions" :key="state" type="button" :class="{ active: selectedAlertStates.includes(state) }" :aria-pressed="selectedAlertStates.includes(state)" @click="toggleAlertState(state)">{{ state }}</button></div></div>
-          <div class="alert-results"><div v-if="matchingAlertSignals.length" class="alert-result-grid"><div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item"><span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" title="该预警状态已持续的已收盘K线根数">+{{ alertCount(signal) }}</span></div></div><div v-else class="alert-empty">{{ alertStatusText }}</div></div>
+          <div class="alert-results">
+            <section v-for="group in alertPeriodGroups" :key="group.durationSeconds" class="alert-period-group" :aria-label="`${group.label}预警`">
+              <h3 class="alert-period-heading"><span>{{ group.label }}</span><small>{{ group.signals.length }} 条</small></h3>
+              <div v-if="group.signals.length" class="alert-result-grid">
+                <div v-for="signal in group.signals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item">
+                  <span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" title="该预警状态已持续的已收盘K线根数">+{{ alertCount(signal) }}</span>
+                </div>
+              </div>
+              <p v-else class="alert-period-empty">暂无匹配预警</p>
+            </section>
+            <div v-if="!alertPeriodGroups.length" class="alert-empty">{{ alertStatusText }}</div>
+          </div>
           <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
         </div>
       </section>

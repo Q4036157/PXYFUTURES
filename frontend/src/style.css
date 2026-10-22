@@ -59,6 +59,10 @@ button { font: inherit; }
 .alert-options button.active.death { color: var(--pxy-text); background: var(--pxy-orange); border-color: var(--pxy-orange); }
 .alert-results { min-height: 320px; max-height: 360px; overflow-y: auto; scrollbar-color: #26718a #0b202b; }
 .alert-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.alert-period-heading { display: flex; align-items: center; gap: 10px; margin: 0; padding: 7px 16px; border-top: 2px solid var(--pxy-orange); color: var(--pxy-mint); background: rgb(185 240 220 / 4%); font-size: 12px; line-height: 1.4; }
+.alert-period-heading::after { content: ''; flex: 1; height: 1px; background: var(--pxy-orange); opacity: .45; }
+.alert-period-heading small { color: #9bb7ae; font-size: 11px; font-weight: 400; }
+.alert-period-empty { margin: 0; padding: 9px 16px; color: #9bb7ae; font-size: 12px; }
 .alert-result-item { display: flex; align-items: center; gap: 9px; min-width: 0; height: 40px; padding: 0 16px; color: var(--pxy-mint); border-right: 1px solid rgb(185 240 220 / 11%); border-bottom: 1px solid rgb(185 240 220 / 11%); font-size: 13px; white-space: nowrap; }
 .alert-result-item:nth-child(2n) { border-right: 0; }
 .alert-result-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
