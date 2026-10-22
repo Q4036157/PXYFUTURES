@@ -225,6 +225,16 @@ function alertCount(signal: AlertSignalSnapshot): number {
   return signal.state_bar_count
 }
 
+function alertCountTitle(signal: AlertSignalSnapshot): string {
+  const [start, end] = [signal.cross_time, signal.confirmed_bar_time].map((value) => {
+    const time = Date.parse(value ?? '')
+    return Number.isFinite(time)
+      ? new Date(time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+      : '未知'
+  })
+  return `原始信号K线：${start}；已统计至收盘K线：${end}（北京时间）；含信号K线共${alertCount(signal)}根，未收盘不计`
+}
+
 function isFreshAlertSignal(signal: AlertSignalSnapshot): boolean {
   if (signal.data_status === 'historical' || signal.data_status === 'expired' || signal.data_source === 'historical') return false
   const confirmedAt = Date.parse(signal.confirmed_at)
@@ -393,6 +403,7 @@ function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): vo
     if (selectedConditions.size && (!condition || !selectedConditions.has(condition))) return false
     if (selectedStates.size && (!state || !selectedStates.has(state))) return false
     if (!selectedAlertDurations.value.includes(signal.period.duration_seconds)) return false
+    if (signal.state_bar_count !== 1) return false
     if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false
     if (!isFreshAlertSignal(signal)) return false
     return alertCounter.accept(signal)
@@ -1295,7 +1306,7 @@ onBeforeUnmount(() => {
               <h3 class="alert-period-heading"><span>{{ group.label }}</span><small>{{ group.signals.length }} 条</small></h3>
               <div v-if="group.signals.length" class="alert-result-grid">
                 <div v-for="signal in group.signals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item">
-                  <span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" title="该预警状态已持续的已收盘K线根数">+{{ alertCount(signal) }}</span>
+                  <span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" :title="alertCountTitle(signal)">+{{ alertCount(signal) }}</span>
                 </div>
               </div>
               <p v-else class="alert-period-empty">暂无匹配预警</p>

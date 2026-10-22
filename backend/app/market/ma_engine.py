@@ -118,6 +118,7 @@ def calculate_signal(
 
     M1/M2 最近一次交叉确定金叉或死叉阶段；之后每根已收盘 K 线根据
     M2 相对 M3/M4 的位置动态更新反弹、震荡、上涨、回调或下跌。
+    计数包含原始交叉信号 K 线，之后每根收盘 K 线加一，方向或阶段变化不重置。
     最新进行中 K 线仍参与实时均线值和方向计算，但不提前改变状态。
     """
     if len(bars) < config.required_bars:
@@ -141,10 +142,8 @@ def calculate_signal(
 
     latest_cross: CrossType | None = None
     cross_time_ns: int | None = None
+    cross_index: int | None = None
     latest_label = "等待交叉"
-    state_since_ns: int | None = None
-    state_bar_count = 0
-    previous_state: tuple[Trend, Trend, CrossType, str] | None = None
     confirmed_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
     confirmed_count = min(len(bars), max(0, confirmed_count))
     for index in range(1, confirmed_count):
@@ -157,31 +156,20 @@ def calculate_signal(
         if m1_prev <= m2_prev and m1_now > m2_now:
             latest_cross = CrossType.GOLDEN
             cross_time_ns = bars[index].timestamp_ns
+            cross_index = index
         elif m1_prev >= m2_prev and m1_now < m2_now:
             latest_cross = CrossType.DEATH
             cross_time_ns = bars[index].timestamp_ns
+            cross_index = index
         if latest_cross is None:
             continue
 
-        current_label = _classify(
+        latest_label = _classify(
             latest_cross,
             float(m2_now),
             float(m3_now),
             float(m4_now),
         )
-        current_state = (
-            Trend.BULLISH if m3_now > m3_prev else Trend.BEARISH,
-            Trend.BULLISH if m4_now > m4_prev else Trend.BEARISH,
-            latest_cross,
-            current_label,
-        )
-        if current_state != previous_state:
-            latest_label = current_label
-            state_since_ns = bars[index].timestamp_ns
-            state_bar_count = 1
-        else:
-            state_bar_count += 1
-        previous_state = current_state
 
     return SignalState(
         trend_m3=trend_m3,
@@ -189,7 +177,7 @@ def calculate_signal(
         cross_type=latest_cross,
         cross_time_ns=cross_time_ns,
         label=latest_label,
-        state_since_ns=state_since_ns,
-        state_bar_count=state_bar_count,
+        state_since_ns=cross_time_ns,
+        state_bar_count=confirmed_count - cross_index if cross_index is not None else 0,
         ma_values=ma_values,
     )

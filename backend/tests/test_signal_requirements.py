@@ -87,6 +87,31 @@ def test_alert_snapshot_ignores_entire_in_progress_bar() -> None:
     assert low_snapshot["confirmed_at"] == "1970-01-01T08:00:07+08:00"
 
 
+def test_alert_count_advances_only_after_each_three_minute_bar_closes() -> None:
+    period = PeriodConfig(id=1, label="3分钟", duration_seconds=180, m4=5, m3=4, m2=3, m1=1)
+    closes = [10, 9, 8, 7, 6, 7, 8, 9, 10, 11, 12]
+    snapshots = []
+    for live_index in range(6, len(closes)):
+        confirmed = [
+            Bar(index * 180_000_000_000, float(close))
+            for index, close in enumerate(closes[:live_index])
+        ]
+        for live_close in (1.0, 1_000.0):
+            market_bars = MarketBars(
+                [*confirmed, Bar(live_index * 180_000_000_000, live_close)], "cache", 1,
+            )
+            snapshot = _snapshot_from_market_bars(
+                "DCE.B2701", period, market_bars, confirmed_only=True,
+            )
+            assert snapshot["state_bar_count"] == live_index - 5
+            assert snapshot["state_since"] == snapshot["cross_time"]
+            assert snapshot["cross_time"] == "1970-01-01T08:15:00+08:00"
+            assert snapshot["bar_close"] == closes[live_index - 1]
+            snapshots.append(snapshot)
+        assert snapshots[-2] == snapshots[-1]
+    assert [snapshot["state_bar_count"] for snapshot in snapshots[::2]] == [1, 2, 3, 4, 5]
+
+
 class MixedHistoryClient:
     def fetch_bars(
         self,

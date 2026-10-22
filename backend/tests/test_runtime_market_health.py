@@ -207,10 +207,11 @@ def test_historical_cache_does_not_generate_real_time_alerts():
 
 
 def test_alert_state_count_expands_history_to_show_true_500_bars():
+    # 原始交叉在索引 52：连同信号 K 共 500 根收盘 K，最后另留一根盘中 K。
     closes = [100 - index for index in range(30)]
     closes += [70 + index for index in range(20)]
-    closes += [90.0] * (556 - len(closes))
-    start_ns = int(datetime.now(UTC).timestamp() * 1_000_000_000) - 556 * 86_400_000_000_000
+    closes += [90.0] * (553 - len(closes))
+    start_ns = int(datetime.now(UTC).timestamp() * 1_000_000_000) - 553 * 86_400_000_000_000
     rows = [
         (start_ns + index * 86_400_000_000_000, close)
         for index, close in enumerate(closes)
@@ -234,6 +235,8 @@ def test_alert_state_count_expands_history_to_show_true_500_bars():
     assert requested_counts == [306, 612]
     assert len(snapshots) == 1
     assert snapshots[0]["state_bar_count"] == 500
+    assert snapshots[0]["state_since"] == snapshots[0]["cross_time"]
+    assert snapshots[0]["cross_time"] == signals._iso_time(rows[52][0])
 
 
 def test_alert_history_expansion_stops_when_cache_is_exhausted():

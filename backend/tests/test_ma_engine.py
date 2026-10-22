@@ -49,8 +49,8 @@ def test_golden_cross_advances_from_rebound_to_rise_without_reverse_cross() -> N
     assert state.cross_type == CrossType.GOLDEN
     assert state.cross_time_ns == 5
     assert state.label == "上涨"
-    assert state.state_since_ns == 7
-    assert state.state_bar_count == 4
+    assert state.state_since_ns == 5
+    assert state.state_bar_count == 6
     assert state.trend_m3 == Trend.BULLISH
     assert state.trend_m4 == Trend.BULLISH
 
@@ -63,8 +63,8 @@ def test_death_cross_advances_from_pullback_to_fall() -> None:
     assert state.cross_type == CrossType.DEATH
     assert state.cross_time_ns == 5
     assert state.label == "下跌"
-    assert state.state_since_ns == 7
-    assert state.state_bar_count == 4
+    assert state.state_since_ns == 5
+    assert state.state_bar_count == 6
 
 
 def test_in_progress_bar_does_not_change_confirmed_state() -> None:
@@ -77,3 +77,56 @@ def test_in_progress_bar_does_not_change_confirmed_state() -> None:
 
     assert confirmed.label == "空震荡"
     assert including_live.label == "上涨"
+
+
+def test_cross_count_survives_phase_and_long_average_direction_changes() -> None:
+    closes = [10, 9, 8, 7, 6, 7, 8, 9, 10, 11, 12]
+    bars = [Bar(timestamp_ns=index, close=float(close)) for index, close in enumerate(closes)]
+    config = MovingAverageConfig(m4=5, m3=4, m2=3, m1=1)
+    states = [calculate_signal(bars[:end], config) for end in range(6, len(bars) + 1)]
+
+    assert [state.state_bar_count for state in states] == [1, 2, 3, 4, 5, 6]
+    assert {state.state_since_ns for state in states} == {5}
+    assert {state.cross_time_ns for state in states} == {5}
+    assert len({state.label for state in states}) > 1
+    assert len({(state.trend_m3, state.trend_m4) for state in states}) > 1
+
+
+def test_count_resets_only_when_new_cross_is_confirmed() -> None:
+    closes = [10, 9, 8, 7, 6, 7, 8, 9, 10, 11, 12, 1, 1, 1]
+    bars = [Bar(timestamp_ns=index, close=float(close)) for index, close in enumerate(closes)]
+    config = MovingAverageConfig(m4=5, m3=4, m2=3, m1=1)
+    before_close = calculate_signal(bars[:12], config, confirmed_bar_count=11)
+    confirmed = calculate_signal(bars[:13], config, confirmed_bar_count=12)
+    next_close = calculate_signal(bars, config, confirmed_bar_count=13)
+
+    assert before_close.cross_type == CrossType.GOLDEN
+    assert before_close.state_bar_count == 6
+    assert confirmed.cross_type == CrossType.DEATH
+    assert confirmed.cross_time_ns == confirmed.state_since_ns == 11
+    assert confirmed.state_bar_count == 1
+    assert next_close.state_since_ns == 11
+    assert next_close.state_bar_count == 2
+    assert calculate_signal(bars, config, confirmed_bar_count=13) == next_close
+
+
+def test_count_uses_actual_bars_across_session_breaks() -> None:
+    closes = [10, 9, 8, 7, 6, 7, 8, 9, 10, 11, 12]
+    bars = [
+        Bar(timestamp_ns=(index * 180 + (5_400 if index >= 8 else 0)) * 1_000_000_000,
+            close=float(close))
+        for index, close in enumerate(closes)
+    ]
+    state = calculate_signal(bars, MovingAverageConfig(m4=5, m3=4, m2=3, m1=1))
+
+    assert state.state_since_ns == bars[5].timestamp_ns
+    assert state.state_bar_count == 6
+
+
+def test_without_original_cross_count_stays_zero() -> None:
+    bars = [Bar(timestamp_ns=index, close=100.0) for index in range(20)]
+    state = calculate_signal(bars, MovingAverageConfig(m4=5, m3=4, m2=3, m1=1))
+
+    assert state.cross_type is None
+    assert state.state_since_ns is None
+    assert state.state_bar_count == 0
