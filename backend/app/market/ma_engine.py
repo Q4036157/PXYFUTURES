@@ -55,6 +55,7 @@ class SignalState:
     cross_time_ns: int | None
     label: str
     state_since_ns: int | None
+    state_bar_count: int
     ma_values: dict[str, float]
 
 
@@ -142,13 +143,16 @@ def calculate_signal(
     cross_time_ns: int | None = None
     latest_label = "等待交叉"
     state_since_ns: int | None = None
-    state_bar_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
-    state_bar_count = min(len(bars), max(0, state_bar_count))
-    for index in range(1, state_bar_count):
+    state_bar_count = 0
+    previous_state: tuple[Trend, Trend, CrossType, str] | None = None
+    confirmed_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
+    confirmed_count = min(len(bars), max(0, confirmed_count))
+    for index in range(1, confirmed_count):
         m1_prev, m2_prev = series["M1"][index - 1], series["M2"][index - 1]
         m1_now, m2_now = series["M1"][index], series["M2"][index]
+        m3_prev, m4_prev = series["M3"][index - 1], series["M4"][index - 1]
         m3_now, m4_now = series["M3"][index], series["M4"][index]
-        if None in (m1_prev, m2_prev, m1_now, m2_now, m3_now, m4_now):
+        if None in (m1_prev, m2_prev, m1_now, m2_now, m3_prev, m4_prev, m3_now, m4_now):
             continue
         if m1_prev <= m2_prev and m1_now > m2_now:
             latest_cross = CrossType.GOLDEN
@@ -165,9 +169,19 @@ def calculate_signal(
             float(m3_now),
             float(m4_now),
         )
-        if current_label != latest_label:
+        current_state = (
+            Trend.BULLISH if m3_now > m3_prev else Trend.BEARISH,
+            Trend.BULLISH if m4_now > m4_prev else Trend.BEARISH,
+            latest_cross,
+            current_label,
+        )
+        if current_state != previous_state:
             latest_label = current_label
             state_since_ns = bars[index].timestamp_ns
+            state_bar_count = 1
+        else:
+            state_bar_count += 1
+        previous_state = current_state
 
     return SignalState(
         trend_m3=trend_m3,
@@ -176,5 +190,6 @@ def calculate_signal(
         cross_time_ns=cross_time_ns,
         label=latest_label,
         state_since_ns=state_since_ns,
+        state_bar_count=state_bar_count,
         ma_values=ma_values,
     )

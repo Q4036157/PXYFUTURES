@@ -9,7 +9,7 @@ const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const signalBaseTime = Date.now() - 120000
 function signal(minutes = 0, contract = fixture[0].contracts[0], period = periods[0]) {
   const time = new Date(signalBaseTime + minutes * 60000).toISOString()
-  return { contract_id: contract.id, symbol: contract.symbol, name: contract.name, period, trend: { m3: '空', m4: '空' }, cross_type: '金叉', cross_time: time, label: '反弹', state_since: time, ma_values: { M1: 1, M2: 2, M3: 3, M4: 4 }, bar_close: 1, bar_time: time, confirmed_bar_time: time, confirmed_at: new Date().toISOString(), data_source: 'live', data_status: 'current', data_updated_at: time }
+  return { contract_id: contract.id, symbol: contract.symbol, name: contract.name, period, trend: { m3: '空', m4: '空' }, cross_type: '金叉', cross_time: time, label: '反弹', state_since: time, state_bar_count: 1, ma_values: { M1: 1, M2: 2, M3: 3, M4: 4 }, bar_close: 1, bar_time: time, confirmed_bar_time: time, confirmed_at: new Date().toISOString(), data_source: 'live', data_status: 'current', data_updated_at: time }
 }
 async function main() {
   const browser = await chromium.launch({ channel: 'msedge', headless: true })
@@ -103,7 +103,7 @@ async function main() {
     await page.waitForSelector('.signal-table tbody tr')
     assert.equal((await codes()).at(-1), 'CF701')
     results.push('新合约追加在自定义顺序末尾并刷新保留')
-    const first = signal(), next = signal(1)
+    const first = signal(), next = { ...signal(1), state_bar_count: 2 }
     await send([first, first])
     assert.deepEqual(await page.locator('.alert-new-badge').allTextContents(), ['+1'])
     await send([first]); await send([first])
@@ -115,21 +115,29 @@ async function main() {
     assert.deepEqual(await page.locator('.alert-new-badge').allTextContents(), ['+1'])
     await send([next])
     assert.deepEqual(await page.locator('.alert-new-badge').allTextContents(), ['+2'])
+    await page.reload()
+    await page.waitForSelector('.signal-table tbody tr')
+    await page.waitForFunction(() => document.querySelector('.alert-new-badge')?.textContent === '+2', null, { timeout: 7000 })
+    assert.deepEqual(await page.locator('.alert-new-badge').allTextContents(), ['+2'])
+    results.push('刷新后按当前状态收盘K线根数恢复+2')
     await closePopup()
     await send([first])
     assert.deepEqual(await page.locator('.alert-new-badge').allTextContents(), ['+2'])
     assert.equal(await page.locator('.market-alert-popup').count(), 0)
-    results.push('重复批次、WebSocket重复与HTTP轮询不累计，真实新事件+2，迟到消息不回退或重弹')
-    const other = signal(0, fixture[0].contracts[1]), otherPeriod = signal(0, fixture[0].contracts[0], periods[1])
+    results.push('状态持续K线数不受重复消息影响，迟到消息不回退或重弹')
+    const other = signal(2, fixture[0].contracts[1]), otherPeriod = signal(0, fixture[0].contracts[0], periods[1])
     await send([next, other, otherPeriod])
     assert.deepEqual((await page.locator('.alert-new-badge').allTextContents()).sort(), ['+1', '+1', '+2'])
+    const newestRow = await page.locator('.alert-result-text').first().textContent()
+    assert.equal(newestRow.includes('CZCE.AP701'), true, `最近触发的行没有置顶：${newestRow}`)
+    results.push('最新进入预警状态的行排在较早的+2之前')
     await closePopup()
     sockets.at(-1).close({ code: 1000 })
     await page.waitForTimeout(1500)
     await send([next, other, otherPeriod])
     assert.equal(await page.locator('.market-alert-popup').count(), 0)
     assert.deepEqual((await page.locator('.alert-new-badge').allTextContents()).sort(), ['+1', '+1', '+2'])
-    results.push('不同合约和周期独立累计，断线重连不重复预警')
+    results.push('不同合约和周期独立排序，断线重连不重复预警')
     await send([{ ...signal(2), data_status: 'historical', data_source: 'historical' }])
     assert.equal(await page.locator('.market-alert-popup').count(), 0)
     await send([{ ...signal(3), cross_time: null }])

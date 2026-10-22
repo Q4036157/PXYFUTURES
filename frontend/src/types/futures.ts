@@ -35,6 +35,7 @@ export interface SignalSnapshot {
   cross_time: string | null
   label: string
   state_since: string | null
+  state_bar_count: number
   ma_values: Record<'M1' | 'M2' | 'M3' | 'M4', number>
   bar_close: number
   bar_time: string

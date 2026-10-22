@@ -71,6 +71,7 @@ def test_alert_snapshot_ignores_entire_in_progress_bar() -> None:
         "cross_time",
         "label",
         "state_since",
+        "state_bar_count",
         "ma_values",
         "bar_close",
         "bar_time",

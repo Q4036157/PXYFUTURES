@@ -125,6 +125,7 @@ def _snapshot_from_market_bars(
         "cross_time": _iso_time(signal.cross_time_ns),
         "label": signal.label,
         "state_since": _iso_time(signal.state_since_ns),
+        "state_bar_count": signal.state_bar_count,
         "ma_values": {name: round(value, 4) for name, value in signal.ma_values.items()},
         "bar_close": calculation_bars[-1].close,
         "bar_time": _iso_time(calculation_bars[-1].timestamp_ns),

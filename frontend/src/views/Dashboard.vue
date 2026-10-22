@@ -4,7 +4,7 @@ import { ArrowDown, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Settin
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
-import { AlertCounter, alertEventKey, alertRowKey, mergeAlertSnapshot } from '@/lib/alertCounter'
+import { AlertCounter, alertEventKey, mergeAlertSnapshot } from '@/lib/alertCounter'
 import alertSoundUrl from '@/assets/ok3.wav?url'
 import type {
   AlertScanResult,
@@ -84,7 +84,6 @@ const alertExcludedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
 const alertPopupBeijingTime = ref('')
-const alertCounts = ref<Record<string, number>>({})
 const contractOrderSaving = ref(false)
 let contractLoadVersion = 0
 const alertStreamConnected = ref(false)
@@ -175,6 +174,10 @@ const matchingAlertSignals = computed(() => {
       return durations.has(signal.period.duration_seconds) && matchesCondition && matchesState
     })
     .sort((left, right) => {
+      const latestEntryFirst = Date.parse(right.state_since ?? '') - Date.parse(left.state_since ?? '')
+      if (Number.isFinite(latestEntryFirst) && latestEntryFirst !== 0) return latestEntryFirst
+      const longerStateFirst = right.state_bar_count - left.state_bar_count
+      if (longerStateFirst) return longerStateFirst
       const durationOrder = commonPeriods.findIndex(
         (period) => period.durationSeconds === left.period.duration_seconds,
       ) - commonPeriods.findIndex(
@@ -212,7 +215,7 @@ function alertText(signal: AlertSignalSnapshot): string {
 }
 
 function alertCount(signal: AlertSignalSnapshot): number {
-  return alertCounts.value[alertRowKey(signal)] ?? 0
+  return signal.state_bar_count
 }
 
 function isFreshAlertSignal(signal: AlertSignalSnapshot): boolean {
@@ -371,10 +374,7 @@ function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): vo
   alertSignals.value = mergeAlertSnapshot(alertSignals.value, data.signals)
   alertFailedCount.value = data.failed
   alertExcludedCount.value = data.excluded_contracts ?? 0
-  if (!allowNotification) {
-    alertCounts.value = Object.fromEntries(alertSignals.value.map((signal) => [alertRowKey(signal), alertCounter.count(signal)]))
-    return
-  }
+  if (!allowNotification) return
 
   const selectedConditions = new Set(selectedAlertConditions.value)
   const selectedStates = new Set(selectedAlertStates.value)
@@ -390,7 +390,6 @@ function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): vo
     if (!isFreshAlertSignal(signal)) return false
     return alertCounter.accept(signal)
   })
-  alertCounts.value = Object.fromEntries(alertSignals.value.map((signal) => [alertRowKey(signal), alertCounter.count(signal)]))
   if (newSignals.length) {
     showAlertNotification(newSignals)
   }
@@ -1284,7 +1283,7 @@ onBeforeUnmount(() => {
           <div class="alert-control-row"><strong>预警周期</strong><div class="alert-options"><button v-for="period in commonPeriods" :key="period.durationSeconds" type="button" :class="{ active: selectedAlertDurations.includes(period.durationSeconds) }" :aria-pressed="selectedAlertDurations.includes(period.durationSeconds)" @click="toggleAlertDuration(period.durationSeconds)">{{ period.label }}</button></div></div>
           <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :class="{ active: selectedAlertConditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="selectedAlertConditions.includes(condition)" @click="toggleAlertCondition(condition)">{{ condition }}</button></div></div>
           <div class="alert-control-row states"><strong>状态条件</strong><div class="alert-options"><button v-for="state in alertStateOptions" :key="state" type="button" :class="{ active: selectedAlertStates.includes(state) }" :aria-pressed="selectedAlertStates.includes(state)" @click="toggleAlertState(state)">{{ state }}</button></div></div>
-          <div class="alert-results"><div v-if="matchingAlertSignals.length" class="alert-result-grid"><div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item"><span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" title="本页监测期间，该合约和周期的有效新信号累计次数；重复推送不累计">+{{ alertCount(signal) }}</span></div></div><div v-else class="alert-empty">{{ alertStatusText }}</div></div>
+          <div class="alert-results"><div v-if="matchingAlertSignals.length" class="alert-result-grid"><div v-for="signal in matchingAlertSignals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item"><span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" title="该预警状态已持续的已收盘K线根数">+{{ alertCount(signal) }}</span></div></div><div v-else class="alert-empty">{{ alertStatusText }}</div></div>
           <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
         </div>
       </section>
