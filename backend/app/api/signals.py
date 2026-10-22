@@ -170,53 +170,96 @@ def _scan_cached_alert_jobs(
         key = (contract.symbol, base_duration_seconds)
         source_counts[key] = max(source_counts.get(key, 0), base_count)
 
-    sources: dict[tuple[str, int], MarketBars] = {}
-    for (symbol, duration_seconds), count in source_counts.items():
-        rows = repository.load_kline_bars(symbol, duration_seconds, count)
-        sync_state = repository.get_kline_sync_state(symbol, duration_seconds)
-        sources[(symbol, duration_seconds)] = MarketBars(
-            bars=[Bar(timestamp_ns=timestamp_ns, close=close) for timestamp_ns, close in rows],
-            source="cache",
-            updated_at_ns=sync_state.last_synced_at_ns if sync_state else None,
-        )
+    sync_states = {
+        key: repository.get_kline_sync_state(*key)
+        for key in source_counts
+    }
+    last_snapshots: dict[tuple[int, int], dict[str, object]] = {}
+    last_errors: set[tuple[int, int]] = set()
 
-    snapshots: list[dict[str, object]] = []
-    failed = 0
-    for contract, period in jobs:
-        base_duration_seconds, _base_count = _cached_source_request(period)
-        source = sources[(contract.symbol, base_duration_seconds)]
-        config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
-        target_count = config.required_bars + _ALERT_STATE_LOOKBACK_BARS
-        bars = source.bars
-        if should_rebuild_for_boyi(period.duration_seconds):
-            bars = rebuild_boyi_bars(bars, period.duration_seconds, base_duration_seconds)
-        market_bars = MarketBars(
-            bars=bars[-target_count:],
-            source="cache",
-            updated_at_ns=source.updated_at_ns,
-        )
-        try:
-            snapshot = _snapshot_from_market_bars(
-                contract.symbol,
-                period,
-                market_bars,
-                confirmed_only=True,
+    for _attempt in range(12):
+        sources: dict[tuple[str, int], MarketBars] = {}
+        for (symbol, duration_seconds), count in source_counts.items():
+            rows = repository.load_kline_bars(symbol, duration_seconds, count)
+            sync_state = sync_states[(symbol, duration_seconds)]
+            sources[(symbol, duration_seconds)] = MarketBars(
+                bars=[Bar(timestamp_ns=timestamp_ns, close=close) for timestamp_ns, close in rows],
+                source="cache",
+                updated_at_ns=sync_state.last_synced_at_ns if sync_state else None,
             )
-        except (MarketDataUnavailable, ValueError) as exc:
-            failed += 1
-            logger.debug("预警缓存计算跳过: symbol=%s error=%s", contract.symbol, exc)
-            continue
-        if snapshot["data_status"] != "current":
-            continue
-        snapshots.append(
-            {
+
+        expanded: set[tuple[str, int]] = set()
+        last_snapshots = {}
+        last_errors = set()
+        for contract, period in jobs:
+            base_duration_seconds, _base_count = _cached_source_request(period)
+            source_key = (contract.symbol, base_duration_seconds)
+            source = sources[source_key]
+            config = MovingAverageConfig(m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1)
+            bars = source.bars
+            if should_rebuild_for_boyi(period.duration_seconds):
+                bars = rebuild_boyi_bars(bars, period.duration_seconds, base_duration_seconds)
+            market_bars = MarketBars(
+                bars=bars,
+                source="cache",
+                updated_at_ns=source.updated_at_ns,
+            )
+            job_key = (contract.id, period.duration_seconds)
+            try:
+                snapshot = _snapshot_from_market_bars(
+                    contract.symbol,
+                    period,
+                    market_bars,
+                    confirmed_only=True,
+                )
+            except (MarketDataUnavailable, ValueError) as exc:
+                last_errors.add(job_key)
+                logger.debug("预警缓存计算跳过: symbol=%s error=%s", contract.symbol, exc)
+                continue
+            last_snapshots[job_key] = {
                 "contract_id": contract.id,
                 "symbol": contract.symbol,
                 "name": contract.name,
                 **snapshot,
             }
-        )
-    return snapshots, failed
+
+            state_since = snapshot["state_since"]
+            state_index = next(
+                (
+                    index
+                    for index, bar in enumerate(market_bars.bars)
+                    if _iso_time(bar.timestamp_ns) == state_since
+                ),
+                -1,
+            )
+            warmup_boundary = config.required_bars + 1
+            at_history_boundary = state_index < warmup_boundary
+            no_cross_in_window = snapshot["cross_type"] is None
+            requested_count = source_counts[source_key]
+            source_complete = len(source.bars) < requested_count
+            if (
+                (at_history_boundary or no_cross_in_window)
+                and not source_complete
+                and requested_count < _MAX_CACHED_BASE_BARS
+            ):
+                expanded.add(source_key)
+
+        if not expanded:
+            break
+        for source_key in expanded:
+            source_counts[source_key] = min(
+                _MAX_CACHED_BASE_BARS,
+                source_counts[source_key] * 2,
+            )
+
+    snapshots = [
+        snapshot
+        for job_key, snapshot in last_snapshots.items()
+        if snapshot["data_status"] == "current"
+        and snapshot["cross_type"] is not None
+        and snapshot["state_bar_count"] > 0
+    ]
+    return snapshots, len(last_errors)
 
 
 def scan_cached_alerts_for_user(

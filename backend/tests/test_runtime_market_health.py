@@ -204,3 +204,58 @@ def test_historical_cache_does_not_generate_real_time_alerts():
     )
     snapshots, failed = signals._scan_cached_alert_jobs(repository, [(ContractConfig(1, "DCE.V2609", "历史", []), period())])
     assert snapshots == [] and failed == 0
+
+
+def test_alert_state_count_expands_history_to_show_true_500_bars():
+    closes = [100 - index for index in range(30)]
+    closes += [70 + index for index in range(20)]
+    closes += [90.0] * (556 - len(closes))
+    start_ns = int(datetime.now(UTC).timestamp() * 1_000_000_000) - 556 * 86_400_000_000_000
+    rows = [
+        (start_ns + index * 86_400_000_000_000, close)
+        for index, close in enumerate(closes)
+    ]
+    requested_counts = []
+
+    def load_bars(_symbol, _duration, count):
+        requested_counts.append(count)
+        return rows[-count:]
+
+    repository = SimpleNamespace(
+        load_kline_bars=load_bars,
+        get_kline_sync_state=lambda *_args: KlineSyncState(1_000, rows[-1][0]),
+    )
+    snapshots, failed = signals._scan_cached_alert_jobs(
+        repository,
+        [(ContractConfig(1, "DCE.V2609", "累计", []), period())],
+    )
+
+    assert failed == 0
+    assert requested_counts == [306, 612]
+    assert len(snapshots) == 1
+    assert snapshots[0]["state_bar_count"] == 500
+
+
+def test_alert_history_expansion_stops_when_cache_is_exhausted():
+    start_ns = int(datetime.now(UTC).timestamp() * 1_000_000_000) - 400 * 86_400_000_000_000
+    rows = [
+        (start_ns + index * 86_400_000_000_000, 100.0)
+        for index in range(400)
+    ]
+    requested_counts = []
+
+    def load_bars(_symbol, _duration, count):
+        requested_counts.append(count)
+        return rows[-count:]
+
+    repository = SimpleNamespace(
+        load_kline_bars=load_bars,
+        get_kline_sync_state=lambda *_args: KlineSyncState(1_000, rows[-1][0]),
+    )
+    snapshots, failed = signals._scan_cached_alert_jobs(
+        repository,
+        [(ContractConfig(1, "DCE.V2609", "无交叉", []), period())],
+    )
+
+    assert snapshots == [] and failed == 0
+    assert requested_counts == [306, 612]
