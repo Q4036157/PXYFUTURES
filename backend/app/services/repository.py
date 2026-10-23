@@ -421,7 +421,7 @@ class ConfigRepository:
         return result
 
     def advance_followup_alert(
-        self, rule_id: int, symbol: str, bar_time: str, matched: bool, closed_at: str,
+        self, rule_id: int, symbol: str, bar_time: str, matched: bool, closed_at: str | None,
     ) -> bool:
         """原子推进收盘游标；同一根或迟到旧K线不能再次触发。"""
         with self._connect() as conn:
@@ -439,6 +439,19 @@ class ConfigRepository:
                 (bar_time, int(matched), int(triggered), closed_at, int(triggered), rule_id),
             )
             return triggered
+
+    def correct_followup_origin(
+        self, rule_id: int, symbol: str, bar_time: str, previous: str | None,
+        closed_at: str | None,
+    ) -> bool:
+        """历史回放校正当前连续区间的起点，不增加触发次数或重新通知。"""
+        with self._connect() as conn:
+            return conn.execute(
+                """UPDATE followup_alerts SET last_triggered_at = ?
+                   WHERE id = ? AND symbol = ? AND last_bar_time = ? AND matched = 1
+                   AND last_triggered_at IS ?""",
+                (closed_at, rule_id, symbol, bar_time, previous),
+            ).rowcount > 0
 
     def claim_followup_notifications(self, user_id: str) -> list[dict[str, object]]:
         """同账号多个页面只领取一次；离线期间保留各条件单的最近触发。"""

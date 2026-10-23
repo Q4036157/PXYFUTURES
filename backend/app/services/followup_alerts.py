@@ -36,6 +36,7 @@ class FollowupAlertService:
         self._contract_status = contract_status
         self._lock = RLock()
         self._wake = asyncio.Event()
+        self._history_checked: set[int] = set()
 
     async def publish_rollovers(self, _event: MarketSyncEvent) -> None:
         self.wake()
@@ -64,7 +65,8 @@ class FollowupAlertService:
             if signal.get("cross_type") else None
         )
         return (
-            (not rule["conditions"] or condition in rule["conditions"])
+            signal.get("cross_type") is not None
+            and (not rule["conditions"] or condition in rule["conditions"])
             and (not rule["states"] or signal["label"] in rule["states"])
         )
 
@@ -99,6 +101,7 @@ class FollowupAlertService:
     def evaluate(self) -> None:
         with self._lock:
             rules = self.repository.list_followup_alerts()
+            self._history_checked.intersection_update(rule["id"] for rule in rules)
             if not rules:
                 return
             contracts: dict[tuple[str, int], ContractConfig | None] = {}
@@ -123,10 +126,12 @@ class FollowupAlertService:
                 key = (contract.id, period.duration_seconds)
                 jobs[key] = (contract, period)
                 cursor = rule["last_bar_time"]
-                # 新建规则只检查当前状态；已有规则从最早尚未处理的收盘K线重放。
-                if key not in cursors or (cursor is not None and (
-                    cursors[key] is None or cursor < cursors[key]
-                )):
+                # 新规则与重启后仍满足的规则先回溯区间；其他规则重放未处理K线。
+                if rule["id"] not in self._history_checked and rule["matched"]:
+                    cursor = None
+                if key not in cursors or cursor is None or (
+                    cursors[key] is not None and cursor < cursors[key]
+                ):
                     cursors[key] = cursor
                 active_rules.setdefault(key, []).append(rule)
             if not jobs:
@@ -136,21 +141,66 @@ class FollowupAlertService:
             for signal in snapshots:
                 key = (signal["contract_id"], signal["period"]["duration_seconds"])
                 latest[key] = max(latest.get(key, ""), signal["confirmed_bar_time"])
-            for signal in sorted(snapshots, key=lambda item: item["confirmed_bar_time"]):
+            ordered = sorted(snapshots, key=lambda item: item["confirmed_bar_time"])
+            histories: dict[tuple[int, int], list[Rule]] = {}
+            for signal in ordered:
+                key = (signal["contract_id"], signal["period"]["duration_seconds"])
+                histories.setdefault(key, []).append(signal)
+            initial_origins: dict[int, str | None] = {}
+            for key, items in active_rules.items():
+                history = histories.get(key, [])
+                for rule in items:
+                    if not history or rule["id"] in self._history_checked:
+                        continue
+                    if rule["last_bar_time"] is None:
+                        initial_origins[rule["id"]] = self._matching_origin(rule, history)
+                    elif rule["matched"]:
+                        prior = [s for s in history if s["confirmed_bar_time"] <= rule["last_bar_time"]]
+                        origin = self._matching_origin(rule, prior)
+                        if (prior and prior[-1]["confirmed_bar_time"] == rule["last_bar_time"]
+                                and origin and origin != rule["last_triggered_at"]
+                                and self.repository.correct_followup_origin(
+                                    rule["id"], rule["symbol"], rule["last_bar_time"],
+                                    rule["last_triggered_at"], origin,
+                                )):
+                            logger.info(
+                                "二级条件起点已校正，不重复通知: rule=%s symbol=%s previous=%s closed_at=%s",
+                                rule["id"], rule["symbol"], rule["last_triggered_at"], origin,
+                            )
+                    self._history_checked.add(rule["id"])
+            for signal in ordered:
                 if signal.get("cross_type") is None:
                     continue
                 key = (signal["contract_id"], signal["period"]["duration_seconds"])
                 for rule in active_rules.get(key, []):
+                    if rule["last_bar_time"] and signal["confirmed_bar_time"] <= rule["last_bar_time"]:
+                        continue
                     if rule["last_bar_time"] is None and signal["confirmed_bar_time"] != latest[key]:
                         continue
+                    closed_at = (
+                        initial_origins.get(rule["id"])
+                        if rule["last_bar_time"] is None else signal["closed_at"]
+                    )
                     if self.repository.advance_followup_alert(
                         rule["id"], rule["symbol"], signal["confirmed_bar_time"],
-                        self.matches(rule, signal), signal["closed_at"],
+                        self.matches(rule, signal), closed_at,
                     ):
                         logger.info(
                             "二级条件已触发: rule=%s symbol=%s period=%ss closed_at=%s",
-                            rule["id"], rule["symbol"], rule["duration_seconds"], signal["closed_at"],
+                            rule["id"], rule["symbol"], rule["duration_seconds"], closed_at,
                         )
+
+    @classmethod
+    def _matching_origin(cls, rule: Rule, history: list[Rule]) -> str | None:
+        """只接受有前一根不满足状态作证的区间起点，历史不足时不猜时间。"""
+        if not history or not cls.matches(rule, history[-1]):
+            return None
+        for index in range(len(history) - 2, -1, -1):
+            if history[index].get("cross_type") is None:
+                return None
+            if not cls.matches(rule, history[index]):
+                return history[index + 1]["closed_at"]
+        return None
 
     def list_rules(self, user_id: str) -> list[Rule]:
         contracts = {item.id: item for item in self.repository.list_contracts(user_id)}

@@ -210,7 +210,7 @@ defineExpose({ open })
           <span class="followup-target">二级条件：{{ targetText(rule) }}</span>
         </div>
         <button type="button" class="followup-delete" aria-label="删除二级条件单" :title="`删除 ${targetText(rule)}`" :disabled="pendingAction" @click="remove(rule)"><el-icon><Close /></el-icon></button>
-        <time class="followup-time" :datetime="rule.last_triggered_at || undefined" :title="`${rule.status}；最近触发的收盘时刻（北京时间）`">{{ triggerTime(rule.last_triggered_at) }}<span v-if="rule.last_triggered_at"> 触发</span></time>
+        <time class="followup-time" :datetime="rule.last_triggered_at || undefined" :title="`${rule.status}；本轮首次满足条件的收盘时刻（北京时间）`">{{ triggerTime(rule.last_triggered_at) || (rule.trigger_count ? '已满足，起点待确认' : '') }}<span v-if="rule.last_triggered_at"> 触发</span></time>
       </div>
       <p v-if="!rules.length" class="followup-empty">暂无条件单</p>
     </div>

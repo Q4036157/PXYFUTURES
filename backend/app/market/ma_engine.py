@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -124,6 +124,30 @@ def calculate_signal(
     if len(bars) < config.required_bars:
         raise ValueError(f"K 线数量不足，至少需要 {config.required_bars} 根有效 K 线")
 
+    confirmed_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
+    confirmed_count = min(len(bars), max(0, confirmed_count))
+    confirmed = None
+    emit_from = max(config.required_bars - 1, confirmed_count - 1)
+    for count, current in enumerate(
+        iter_signal_history(bars, config, emit_from=emit_from), start=emit_from + 1,
+    ):
+        if count == confirmed_count:
+            confirmed = current
+    return SignalState(
+        trend_m3=current.trend_m3, trend_m4=current.trend_m4,
+        cross_type=confirmed.cross_type if confirmed else None,
+        cross_time_ns=confirmed.cross_time_ns if confirmed else None,
+        label=confirmed.label if confirmed else "等待交叉",
+        state_since_ns=confirmed.state_since_ns if confirmed else None,
+        state_bar_count=confirmed.state_bar_count if confirmed else 0,
+        ma_values=current.ma_values,
+    )
+
+
+def iter_signal_history(
+    bars: Sequence[Bar], config: MovingAverageConfig, *, emit_from: int = 0,
+) -> Iterator[SignalState]:
+    """一次计算全部历史状态，从满足均线长度的第一根开始逐根返回。"""
     closes = [bar.close for bar in bars]
     series = {
         "M4": _sma_series(closes, config.m4),
@@ -131,22 +155,11 @@ def calculate_signal(
         "M2": _sma_series(closes, config.m2),
         "M1": _short_series(closes, config.m1),
     }
-    latest = len(bars) - 1
-    previous = latest - 1
-    ma_values = {name: float(values[latest]) for name, values in series.items() if values[latest] is not None}
-    if len(ma_values) != 4:
-        raise ValueError("均线数据不完整")
-
-    trend_m3 = Trend.BULLISH if series["M3"][latest] > series["M3"][previous] else Trend.BEARISH
-    trend_m4 = Trend.BULLISH if series["M4"][latest] > series["M4"][previous] else Trend.BEARISH
-
     latest_cross: CrossType | None = None
     cross_time_ns: int | None = None
     cross_index: int | None = None
     latest_label = "等待交叉"
-    confirmed_count = len(bars) if confirmed_bar_count is None else confirmed_bar_count
-    confirmed_count = min(len(bars), max(0, confirmed_count))
-    for index in range(1, confirmed_count):
+    for index in range(config.required_bars - 1, len(bars)):
         m1_prev, m2_prev = series["M1"][index - 1], series["M2"][index - 1]
         m1_now, m2_now = series["M1"][index], series["M2"][index]
         m3_prev, m4_prev = series["M3"][index - 1], series["M4"][index - 1]
@@ -161,23 +174,15 @@ def calculate_signal(
             latest_cross = CrossType.DEATH
             cross_time_ns = bars[index].timestamp_ns
             cross_index = index
-        if latest_cross is None:
+        if latest_cross is not None:
+            latest_label = _classify(latest_cross, float(m2_now), float(m3_now), float(m4_now))
+        if index < emit_from:
             continue
-
-        latest_label = _classify(
-            latest_cross,
-            float(m2_now),
-            float(m3_now),
-            float(m4_now),
+        yield SignalState(
+            trend_m3=Trend.BULLISH if m3_now > m3_prev else Trend.BEARISH,
+            trend_m4=Trend.BULLISH if m4_now > m4_prev else Trend.BEARISH,
+            cross_type=latest_cross, cross_time_ns=cross_time_ns, label=latest_label,
+            state_since_ns=cross_time_ns,
+            state_bar_count=index - cross_index + 1 if cross_index is not None else 0,
+            ma_values={name: float(values[index]) for name, values in series.items()},
         )
-
-    return SignalState(
-        trend_m3=trend_m3,
-        trend_m4=trend_m4,
-        cross_type=latest_cross,
-        cross_time_ns=cross_time_ns,
-        label=latest_label,
-        state_since_ns=cross_time_ns,
-        state_bar_count=confirmed_count - cross_index if cross_index is not None else 0,
-        ma_values=ma_values,
-    )

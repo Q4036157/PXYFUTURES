@@ -50,11 +50,11 @@ def setup_rule(monkeypatch, tmp_path):
 
 def test_existing_matching_state_is_immediate_and_survives_restart(setup_rule):
     repo, _, snapshots, _, service, signal, create = setup_rule
-    snapshots.append(signal(4))
+    snapshots[:] = [signal(0, "反弹"), signal(1), signal(2), signal(3), signal(4)]
     create()
     rule = service.list_rules("owner")[0]
     assert rule["trigger_count"] == 1
-    assert rule["last_triggered_at"] == signal(4)["closed_at"]
+    assert rule["last_triggered_at"] == signal(1)["closed_at"]
     assert rule["source"]["state"] == "反弹"
     assert len(repo.claim_followup_notifications("owner")) == 1
     assert repo.claim_followup_notifications("owner") == []
@@ -80,6 +80,75 @@ def test_only_nonmatching_to_matching_transition_realerts_without_new_cross(setu
     service.evaluate()
     assert service.list_rules("owner")[0]["trigger_count"] == 2
     assert repo.claim_followup_notifications("owner")[0]["trigger_count"] == 2
+
+
+def test_restart_corrects_legacy_latest_bar_time_without_another_notification(setup_rule):
+    repo, contract, snapshots, _, service, signal, _ = setup_rule
+    rule_id = repo.create_followup_alert(
+        "owner", contract.id, contract.symbol, {}, 1800, [], ["下跌"],
+    )
+    repo.advance_followup_alert(
+        rule_id, contract.symbol, signal(4)["confirmed_bar_time"], True, signal(4)["closed_at"],
+    )
+    repo.claim_followup_notifications("owner")
+    snapshots[:] = [signal(0, "反弹"), signal(1), signal(2), signal(3), signal(4)]
+    service.evaluate()
+    rule = service.list_rules("owner")[0]
+    assert rule["last_triggered_at"] == signal(1)["closed_at"]
+    assert rule["trigger_count"] == 1
+    assert repo.list_followup_alerts()[0]["notified_count"] == 1
+    assert repo.claim_followup_notifications("owner") == []
+    snapshots.append(signal(5))
+    service.evaluate()
+    assert service.list_rules("owner")[0]["last_triggered_at"] == signal(1)["closed_at"]
+    assert repo.claim_followup_notifications("owner") == []
+
+
+def test_origin_uses_entire_selected_predicate_not_just_cross_or_label(setup_rule):
+    _, _, snapshots, _, service, signal, create = setup_rule
+    snapshots[:] = [signal(0, "反弹"), signal(1), signal(2), signal(3)]
+    snapshots[1]["trend"]["m3"] = "多"
+    create(conditions=["空空死叉"])
+    assert service.list_rules("owner")[0]["last_triggered_at"] == signal(2)["closed_at"]
+
+
+def test_missing_history_does_not_invent_latest_bar_as_origin(setup_rule):
+    repo, _, snapshots, _, service, signal, create = setup_rule
+    snapshots.append(signal(4))
+    create()
+    rule = service.list_rules("owner")[0]
+    assert rule["trigger_count"] == 1
+    assert rule["last_triggered_at"] is None
+    snapshots[:] = [signal(5, "反弹"), signal(6)]
+    service.evaluate()
+    assert service.list_rules("owner")[0]["last_triggered_at"] == signal(6)["closed_at"]
+    repo.claim_followup_notifications("owner")
+    snapshots[:] = [signal(6)]
+    FollowupAlertService(repo, service._scanner).evaluate()
+    assert service.list_rules("owner")[0]["last_triggered_at"] == signal(6)["closed_at"]
+    assert repo.claim_followup_notifications("owner") == []
+
+
+def test_unknown_cross_in_history_is_not_evidence_of_a_nonmatching_bar(setup_rule):
+    _, _, snapshots, _, service, signal, create = setup_rule
+    snapshots[:] = [signal(0, "等待交叉", cross=None), signal(1), signal(2)]
+    create()
+    rule = service.list_rules("owner")[0]
+    assert rule["trigger_count"] == 1
+    assert rule["last_triggered_at"] is None
+
+
+def test_origin_correction_cannot_overwrite_concurrently_advanced_cursor(setup_rule):
+    repo, contract, _, _, _, signal, create = setup_rule
+    rule_id = create()
+    repo.advance_followup_alert(
+        rule_id, contract.symbol, signal(4)["confirmed_bar_time"], True, signal(4)["closed_at"],
+    )
+    assert not repo.correct_followup_origin(
+        rule_id, contract.symbol, signal(3)["confirmed_bar_time"],
+        signal(4)["closed_at"], signal(1)["closed_at"],
+    )
+    assert repo.list_followup_alerts()[0]["last_triggered_at"] == signal(4)["closed_at"]
 
 
 @pytest.mark.parametrize(("conditions", "states", "label", "cross", "expected"), [
@@ -190,7 +259,7 @@ def test_replay_intermediate_bars_and_ignore_current_unclosed_bar(monkeypatch, t
     repo.save_kline_bars(contract.symbol, 300, rows, requested_count=300, synced_at_ns=rows[-1][0])
     initial, failed = _scan_cached_alert_jobs(repo, [(contract, period)], replay_since={(contract.id, 1800): None})
     assert failed == 0
-    assert len(initial) == 1
+    assert len(initial) > 1
     cursor = (origin + timedelta(minutes=10 * 30)).astimezone(
         timezone_china(),
     ).isoformat()
@@ -202,11 +271,47 @@ def test_replay_intermediate_bars_and_ignore_current_unclosed_bar(monkeypatch, t
     assert [item["confirmed_bar_time"] for item in replayed] == sorted(
         item["confirmed_bar_time"] for item in replayed
     )
-    assert replayed[-1]["confirmed_bar_time"] == initial[0]["confirmed_bar_time"]
+    assert replayed[-1]["confirmed_bar_time"] == initial[-1]["confirmed_bar_time"]
     assert replayed[-1]["closed_at"] == (origin + timedelta(minutes=16 * 30)).astimezone(
         timezone_china(),
     ).isoformat()
     assert len({item["label"] for item in replayed}) > 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_cached_ten_minute_origin_is_first_matching_close_not_creation(setup_rule, legacy):
+    repo, contract, _, _, _, _, _ = setup_rule
+    period = PeriodConfig(None, "10分钟", 600, 5, 4, 3, 1)
+    repo.save_period("owner", contract.id, period)
+    origin = datetime.now(timezone_china()).replace(
+        hour=21, minute=0, second=0, microsecond=0,
+    ) - timedelta(days=1)
+    closes = [30, 29, 28, 27, 26, 27, 28, 29, 30, 31, 32, 21, 20, 19, 18, 17, 16, 15, 14]
+    rows = [
+        (int((origin + timedelta(minutes=index * 10 + step * 5)).timestamp()) * 10**9, close)
+        for index, close in enumerate(closes) for step in range(2)
+    ]
+    repo.save_kline_bars(contract.symbol, 300, rows, requested_count=500, synced_at_ns=rows[-1][0])
+    service = FollowupAlertService(
+        repo, lambda r, jobs, cursors: _scan_cached_alert_jobs(r, jobs, replay_since=cursors),
+    )
+    if legacy:
+        rid = repo.create_followup_alert("owner", contract.id, contract.symbol, {}, 600, [], ["下跌"])
+        repo.advance_followup_alert(
+            rid, contract.symbol, (origin + timedelta(minutes=170)).isoformat(), True,
+            (origin + timedelta(minutes=180)).isoformat(),
+        )
+        repo.claim_followup_notifications("owner")
+        service.evaluate()
+    else:
+        service.create_rule("owner", contract.id, {"duration_seconds": 7200}, 600, [], ["下跌"])
+    rule = service.list_rules("owner")[0]
+    # 第12根下跌后曾短暂反弹，本轮从第15根重新进入下跌起算。
+    assert rule["last_triggered_at"] == (origin + timedelta(minutes=150)).isoformat()
+    assert rule["trigger_count"] == 1
+    assert len(repo.claim_followup_notifications("owner")) == (0 if legacy else 1)
+    service.evaluate()
+    assert repo.claim_followup_notifications("owner") == []
 
 
 def timezone_china():
@@ -226,8 +331,8 @@ def test_lunch_gap_uses_actual_bar_close_not_next_session_start(setup_rule):
         repo, [(contract, PeriodConfig(None, "5分钟", 300, 5, 4, 3, 1))],
         replay_since={(contract.id, 300): None},
     )
-    assert result[0]["closed_at"] == day.replace(hour=11, minute=30).isoformat()
-    assert result[0]["confirmed_at"] == times[-1].isoformat()
+    assert result[-1]["closed_at"] == day.replace(hour=11, minute=30).isoformat()
+    assert result[-1]["confirmed_at"] == times[-1].isoformat()
 
 
 def test_daily_close_uses_day_session_cache_and_adds_its_background_source(setup_rule):

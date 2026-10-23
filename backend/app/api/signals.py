@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 
@@ -17,7 +17,7 @@ from app.market.boyi_kline import (
     rebuild_boyi_bars,
     should_rebuild_for_boyi,
 )
-from app.market.ma_engine import Bar, MovingAverageConfig, calculate_signal
+from app.market.ma_engine import Bar, MovingAverageConfig, calculate_signal, iter_signal_history
 from app.market.tq_client import MarketBars, MarketDataUnavailable, TqClient
 from app.services import auth as auth_service
 from app.services.alert_stream import AlertStreamService, AlertSubscriber
@@ -170,6 +170,9 @@ def _scan_cached_alert_jobs(
     source_counts: dict[tuple[str, int], int] = {}
     for contract, period in jobs:
         base_duration_seconds, base_count = _cached_source_request(period)
+        # 首次监控和重启校正需要完整可用历史，不能把最近一根当作状态起点。
+        if replay_since is not None and replay_since.get((contract.id, period.duration_seconds)) is None:
+            base_count = _MAX_CACHED_BASE_BARS
         key = (contract.symbol, base_duration_seconds)
         source_counts[key] = max(source_counts.get(key, 0), base_count)
 
@@ -275,32 +278,28 @@ def _scan_cached_alert_jobs(
             base_duration, _ = _cached_source_request(period)
             source = sources[(contract.symbol, base_duration)]
             source_times = [bar.timestamp_ns for bar in source.bars]
-            required_bars = MovingAverageConfig(
+            config = MovingAverageConfig(
                 m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1,
-            ).required_bars
-            if cursor is None:
-                indices = [len(history.bars) - 2]
-            else:
-                indices = [
-                    index for index in range(len(history.bars) - 1)
-                    if _iso_time(history.bars[index].timestamp_ns) > cursor
-                ]
-            for index in indices:
-                if index < required_bars - 1:
-                    continue
+            )
+            emit_from = config.required_bars - 1
+            if cursor is not None:
+                cursor_ns = int(datetime.fromisoformat(cursor).timestamp() * 1_000_000_000)
+                emit_from = max(emit_from, bisect_right(
+                    [bar.timestamp_ns for bar in history.bars], cursor_ns,
+                ))
+            for index, state in enumerate(
+                iter_signal_history(history.bars[:-1], config, emit_from=emit_from), start=emit_from,
+            ):
                 if index == len(history.bars) - 2:
                     item = dict(latest)
                 else:
                     item = {
                         "contract_id": contract.id, "symbol": contract.symbol, "name": contract.name,
-                        **_snapshot_from_market_bars(
-                            contract.symbol, period,
-                            MarketBars(
-                                bars=history.bars[:index + 2], source="cache",
-                                updated_at_ns=history.updated_at_ns,
-                            ),
-                            confirmed_only=True,
-                        ),
+                        "period": period.__dict__,
+                        "trend": {"m3": state.trend_m3, "m4": state.trend_m4},
+                        "cross_type": state.cross_type, "label": state.label,
+                        "confirmed_bar_time": _iso_time(history.bars[index].timestamp_ns),
+                        "confirmed_at": _iso_time(history.bars[index + 1].timestamp_ns),
                     }
                 # 由实际参与聚合的最后一根基础K线取收盘时间，午休、夜盘间隔不计入。
                 if period.duration_seconds < 86_400:
