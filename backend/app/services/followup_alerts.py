@@ -223,7 +223,7 @@ class FollowupAlertService:
                     )
                     if self.repository.advance_followup_alert(
                         rule["id"], rule["symbol"], signal["confirmed_bar_time"],
-                        self.matches(rule, signal), closed_at,
+                        self.matches(rule, signal), closed_at, signal["label"],
                     ):
                         logger.info(
                             "二级条件已触发: rule=%s symbol=%s period=%ss closed_at=%s",

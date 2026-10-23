@@ -141,6 +141,7 @@ class ConfigRepository:
                     last_bar_time TEXT,
                     matched INTEGER NOT NULL DEFAULT 0,
                     last_triggered_at TEXT,
+                    last_triggered_state TEXT,
                     trigger_count INTEGER NOT NULL DEFAULT 0,
                     notified_count INTEGER NOT NULL DEFAULT 0
                 );
@@ -156,6 +157,9 @@ class ConfigRepository:
                 conn.execute("ALTER TABLE contracts ADD COLUMN group_id INTEGER REFERENCES contract_groups(id)")
             if "sort_order" not in contract_columns:
                 conn.execute("ALTER TABLE contracts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+            followup_columns = {row["name"] for row in conn.execute("PRAGMA table_info(followup_alerts)")}
+            if "last_triggered_state" not in followup_columns:
+                conn.execute("ALTER TABLE followup_alerts ADD COLUMN last_triggered_state TEXT")
 
     def list_contracts(self, user_id: str) -> list[ContractConfig]:
         with self._connect() as conn:
@@ -453,6 +457,7 @@ class ConfigRepository:
 
     def advance_followup_alert(
         self, rule_id: int, symbol: str, bar_time: str, matched: bool, closed_at: str | None,
+        triggered_state: str | None = None,
     ) -> bool:
         """原子推进收盘游标；同一根或迟到旧K线不能再次触发。"""
         with self._connect() as conn:
@@ -466,8 +471,10 @@ class ConfigRepository:
             conn.execute(
                 """UPDATE followup_alerts SET last_bar_time = ?, matched = ?,
                    last_triggered_at = CASE WHEN ? THEN ? ELSE last_triggered_at END,
+                   last_triggered_state = CASE WHEN ? THEN ? ELSE last_triggered_state END,
                    trigger_count = trigger_count + ? WHERE id = ?""",
-                (bar_time, int(matched), int(triggered), closed_at, int(triggered), rule_id),
+                (bar_time, int(matched), int(triggered), closed_at, int(triggered), triggered_state,
+                 int(triggered), rule_id),
             )
             return triggered
 

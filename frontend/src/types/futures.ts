@@ -92,6 +92,7 @@ export interface FollowupRule {
   conditions: string[]
   states: string[]
   last_triggered_at: string | null
+  last_triggered_state?: string | null
   last_bar_time: string | null
   matched: boolean
   trigger_count: number

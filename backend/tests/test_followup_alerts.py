@@ -56,6 +56,7 @@ def test_existing_matching_state_is_immediate_and_survives_restart(setup_rule):
     rule = service.list_rules("owner")[0]
     assert rule["trigger_count"] == 1
     assert rule["last_triggered_at"] == signal(1)["closed_at"]
+    assert rule["last_triggered_state"] == "下跌"
     assert rule["source"]["state"] == "反弹"
     assert len(repo.claim_followup_notifications("owner")) == 1
     assert repo.claim_followup_notifications("owner") == []
@@ -64,6 +65,36 @@ def test_existing_matching_state_is_immediate_and_survives_restart(setup_rule):
     restarted = FollowupAlertService(reloaded, service._scanner)
     restarted.evaluate()
     assert restarted.list_rules("owner")[0]["trigger_count"] == 1
+    assert restarted.list_rules("owner")[0]["last_triggered_state"] == "下跌"
+    assert reloaded.claim_followup_notifications("owner") == []
+
+
+@pytest.mark.parametrize("state", ["上涨", "回调", "多震荡", "下跌", "反弹", "空震荡"])
+def test_notification_persists_actual_trigger_state_without_state_filter(setup_rule, state):
+    repo, _, snapshots, _, service, signal, create = setup_rule
+    snapshots[:] = [signal(0, state)]
+    create(states=[])
+    assert repo.claim_followup_notifications("owner")[0]["last_triggered_state"] == state
+    snapshots[:] = [signal(1, "上涨" if state != "上涨" else "下跌")]
+    service.evaluate()
+    # 条件持续满足只推进K线，声音仍对应原始触发状态。
+    assert repo.list_followup_alerts()[0]["last_triggered_state"] == state
+    assert repo.claim_followup_notifications("owner") == []
+
+
+def test_legacy_database_adds_trigger_state_without_resetting_or_renotifying(setup_rule):
+    repo, _, snapshots, _, _, signal, create = setup_rule
+    snapshots[:] = [signal(0)]
+    create()
+    repo.claim_followup_notifications("owner")
+    before = repo.list_followup_alerts()[0]
+    with repo._connect() as conn:
+        conn.execute("ALTER TABLE followup_alerts DROP COLUMN last_triggered_state")
+    reloaded = ConfigRepository()
+    after = reloaded.list_followup_alerts()[0]
+    assert after.pop("last_triggered_state") is None
+    before.pop("last_triggered_state")
+    assert after == before
     assert reloaded.claim_followup_notifications("owner") == []
 
 

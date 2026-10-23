@@ -4,9 +4,10 @@ import { Close } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { client } from '@/api/client'
 import { alertConditionOptions, alertStateOptions, commonPeriods } from '@/lib/alertOptions'
+import type { StateAlertSound } from '@/lib/alertSound'
 import type { AlertSignalSnapshot, ContractConfig, FollowupRule } from '@/types/futures'
 
-const props = defineProps<{ contracts: ContractConfig[], collapsed: boolean }>()
+const props = defineProps<{ contracts: ContractConfig[], collapsed: boolean, sounds: StateAlertSound }>()
 const emit = defineEmits<{ toggle: [] }>()
 const rules = ref<FollowupRule[]>([])
 const dialogVisible = ref(false)
@@ -32,7 +33,6 @@ const reviewStale = computed(() => review.value && (
 let alive = false
 let timer: number | undefined
 let refreshTask: Promise<void> | null = null
-let audio: AudioContext | null = null
 
 function conditionText(signal: AlertSignalSnapshot): string {
   return signal.cross_type ? `${signal.trend.m4}${signal.trend.m3}${signal.cross_type}` : ''
@@ -113,33 +113,7 @@ function toggle(values: string[], value: string): string[] {
 }
 
 function unlockSound(): void {
-  try {
-    audio ??= new AudioContext()
-    void audio.resume().catch(() => undefined)
-  } catch {
-    // 无音频设备时仍保留页面提醒与触发时间。
-  }
-}
-
-function playSound(): void {
-  unlockSound()
-  if (!audio) return
-  const context = audio
-  for (const [index, frequency] of [880, 1174.66, 1567.98, 880, 1174.66, 1567.98].entries()) {
-    const oscillator = context.createOscillator()
-    const gain = context.createGain()
-    const start = context.currentTime + index * 0.22
-    oscillator.type = 'sine'
-    oscillator.frequency.value = frequency
-    gain.gain.setValueAtTime(0, start)
-    gain.gain.linearRampToValueAtTime(0.12, start + 0.015)
-    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.18)
-    oscillator.connect(gain)
-    gain.connect(context.destination)
-    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect() }
-    oscillator.start(start)
-    oscillator.stop(start + 0.2)
-  }
+  props.sounds.unlock()
 }
 
 function open(signal: AlertSignalSnapshot): void {
@@ -167,7 +141,7 @@ async function claimNotifications(): Promise<void> {
       : rule
   })
   popupItems.value = items
-  playSound()
+  props.sounds.playStates(items.map(rule => rule.last_triggered_state || (rule.states.length === 1 ? rule.states[0] : null)))
   if (document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
     new Notification(`二级预警 · ${items.length}条条件成立`, {
       body: items.slice(0, 5).map(rule => `${targetText(rule)}\n北京时间 ${triggerTime(rule.last_triggered_at)}`).join('\n'),
@@ -249,7 +223,6 @@ onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
   window.removeEventListener('pointerdown', unlockSound)
   window.removeEventListener('keydown', unlockSound)
-  void audio?.close().catch(() => undefined)
 })
 defineExpose({ open })
 </script>

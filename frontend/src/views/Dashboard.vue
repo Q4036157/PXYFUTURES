@@ -5,7 +5,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
 import { AlertCounter, alertEventKey, mergeAlertSnapshot } from '@/lib/alertCounter'
-import alertSoundUrl from '@/assets/ok3.wav?url'
+import buySoundUrl from '@/assets/Buy.wav?url'
+import sellSoundUrl from '@/assets/Sell.wav?url'
+import { StateAlertSound } from '@/lib/alertSound'
 import FollowupAlertPanel from '@/components/FollowupAlertPanel.vue'
 import { alertConditionOptions, alertStateOptions, commonPeriods } from '@/lib/alertOptions'
 import type { AlertCondition, AlertState } from '@/lib/alertOptions'
@@ -94,11 +96,12 @@ const notificationPermission = ref<NotificationPermission | 'unsupported'>(
 const credentialStatus = ref<TqCredentialStatus | null>(null)
 const credentialsSaving = ref(false)
 const alertCounter = new AlertCounter()
-const soundTimers = new Set<number>()
+const alertSound = new StateAlertSound({ buy: buySoundUrl, sell: sellSoundUrl }, () => {
+  alertScanError.value = '声音暂不可用，请点击任一预警按钮后继续监测'
+})
 const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 const ALERT_FRESHNESS_MS = 3 * 60 * 1_000
 const ALERT_SAFETY_SCAN_MS = 5_000
-let alertAudio: HTMLAudioElement | null = null
 let alertRescanPending = false
 let alertSocket: WebSocket | null = null
 let alertSocketReconnectDelay = 1_000
@@ -269,22 +272,8 @@ function enableAllAlertPeriods(): void {
   if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
-function getAlertAudio(): HTMLAudioElement {
-  if (!alertAudio) {
-    alertAudio = new Audio(alertSoundUrl)
-    alertAudio.preload = 'auto'
-  }
-  return alertAudio
-}
-
 function enableBrowserAlerts(): void {
-  const audio = getAlertAudio()
-  audio.muted = true
-  void audio.play().then(() => {
-    audio.pause()
-    audio.currentTime = 0
-    audio.muted = false
-  }).catch(() => undefined)
+  alertSound.unlock()
 
   if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
     void Notification.requestPermission().then((permission) => {
@@ -323,22 +312,6 @@ function toggleAlertState(state: AlertState): void {
   if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
-function playAlertSound(): void {
-  const audio = getAlertAudio()
-  for (let index = 0; index < 5; index += 1) {
-    const soundTimer = window.setTimeout(() => {
-      soundTimers.delete(soundTimer)
-      audio.pause()
-      audio.currentTime = 0
-      audio.muted = false
-      void audio.play().catch(() => {
-        alertScanError.value = '浏览器已阻止声音，请点击任一预警按钮后继续监测'
-      })
-    }, index * 1_000)
-    soundTimers.add(soundTimer)
-  }
-}
-
 function currentBeijingTime(): string {
   const time = new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai',
@@ -357,7 +330,7 @@ function closeAlertPopup(): void {
 function showAlertNotification(items: AlertSignalSnapshot[]): void {
   const beijingTime = currentBeijingTime()
   alertPopupBeijingTime.value = beijingTime
-  playAlertSound()
+  alertSound.playStates(items.map(item => item.label))
   if (!document.hidden) {
     alertPopupSignals.value = items
     alertPopupVisible.value = true
@@ -1173,9 +1146,7 @@ onBeforeUnmount(() => {
     alertSocket.close(1000, '页面已关闭')
     alertSocket = null
   }
-  for (const soundTimer of soundTimers) window.clearTimeout(soundTimer)
-  soundTimers.clear()
-  alertAudio?.pause()
+  alertSound.dispose()
   signalAbortController?.abort()
   for (const signal of signals.value) flushPeriodNote(signal)
   for (const noteTimer of noteSaveTimers.values()) window.clearTimeout(noteTimer)
@@ -1331,7 +1302,7 @@ onBeforeUnmount(() => {
           <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
         </div>
       </section>
-      <div ref="followupContainerRef" class="followup-panel-wrap"><FollowupAlertPanel ref="followupPanel" :contracts="contracts" :collapsed="collapsedPanels.followup" @toggle="togglePanel('followup')" /></div>
+      <div ref="followupContainerRef" class="followup-panel-wrap"><FollowupAlertPanel ref="followupPanel" :contracts="contracts" :sounds="alertSound" :collapsed="collapsedPanels.followup" @toggle="togglePanel('followup')" /></div>
     </section>
 
       </div>

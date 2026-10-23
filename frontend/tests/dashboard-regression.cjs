@@ -26,11 +26,14 @@ async function main() {
   let holdSuggestions = false, releaseSuggestions = null, failSuggestions = false
   page.on('pageerror', error => errors.push(error.message))
   await page.addInitScript(() => {
-    window.__followupTones = 0
-    const createOscillator = AudioContext.prototype.createOscillator
-    AudioContext.prototype.createOscillator = function (...args) {
-      window.__followupTones += 1
-      return createOscillator.apply(this, args)
+    window.__alertSoundPlays = []
+    window.__nativeMediaPlay = HTMLMediaElement.prototype.play
+    HTMLMediaElement.prototype.play = function () {
+      if (!this.muted) {
+        window.__alertSoundPlays.push(new URL(this.src).pathname)
+        queueMicrotask(() => this.dispatchEvent(new Event('ended')))
+      }
+      return Promise.resolve()
     }
     if (!localStorage.getItem('pxy-futures-alert-preferences-v1')) {
       localStorage.setItem('pxy-futures-alert-preferences-v1', JSON.stringify({ durations: [300, 600], conditions: [], states: [] }))
@@ -67,6 +70,7 @@ async function main() {
             ...body, id: nextFollowupId++, symbol: fixture[0].contracts[0].symbol,
             source: { ...body.source, period_label: `${body.source.duration_seconds / 60}分钟` },
             last_triggered_at: followupAlreadyMatches ? '2026-10-23T12:00:00+08:00' : null,
+            last_triggered_state: followupAlreadyMatches ? '下跌' : null,
             last_bar_time: null, matched: followupAlreadyMatches,
             trigger_count: followupAlreadyMatches ? 1 : 0,
             status: followupAlreadyMatches ? '条件已满足' : '监控中',
@@ -365,6 +369,7 @@ async function main() {
     assert.equal(await secondaryDialog.isVisible(), true)
     failFollowupSave = false
     followupAlreadyMatches = true
+    const soundsBeforeFollowup = await page.evaluate(() => window.__alertSoundPlays.length)
     await secondaryDialog.getByRole('button', { name: '确定', exact: true }).click()
     await secondaryDialog.waitFor({ state: 'hidden' })
     await page.locator('.followup-popup').waitFor()
@@ -372,7 +377,8 @@ async function main() {
     assert.deepEqual(followupRequests.at(-1).states, ['下跌'])
     assert.equal(await page.locator('.followup-rule').count(), 1)
     assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00')
-    assert.equal(await page.evaluate(() => window.__followupTones), 6)
+    assert.equal(await page.evaluate(() => window.__alertSoundPlays.length), soundsBeforeFollowup + 5)
+    assert.ok(await page.evaluate(() => window.__alertSoundPlays.slice(-5).every(src => /\/Sell-.*\.wav$/.test(src))))
     const popupPosition = await page.locator('.followup-popup').evaluate(node => {
       const popup = node.getBoundingClientRect(), panel = node.closest('.followup-center').getBoundingClientRect()
       return { absolute: getComputedStyle(node).position === 'absolute', within: popup.left >= panel.left && popup.right <= panel.right + 1, top: Math.round(popup.top - panel.top) }
@@ -383,26 +389,27 @@ async function main() {
     await page.getByRole('button', { name: '关闭二级预警提示', exact: true }).click()
     await page.waitForTimeout(3200)
     assert.equal(await page.locator('.followup-popup').count(), 0)
-    assert.equal(await page.evaluate(() => window.__followupTones), 6)
+    assert.equal(await page.evaluate(() => window.__alertSoundPlays.length), soundsBeforeFollowup + 5)
     await page.reload()
     await page.waitForSelector('.followup-rule')
     assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00')
     assert.equal(await page.locator('.followup-popup').count(), 0)
-    assert.equal(await page.evaluate(() => window.__followupTones), 0)
-    results.push('一级整行可点击、三栏设置、保存失败保留选择、已满足立即提醒、独立提示音、红框内右上角提示、刷新不重响')
+    assert.equal(await page.evaluate(() => window.__alertSoundPlays.length), 0)
+    results.push('一级整行可点击、三栏设置、保存失败保留选择、已满足立即提醒、状态提示音、红框内右上角提示、刷新不重响')
     await page.locator('.alert-result-link').first().click()
     await secondaryDialog.waitFor()
     await secondaryDialog.getByRole('button', { name: '5分钟', exact: true }).click()
     await secondaryDialog.getByRole('button', { name: '空空死叉', exact: true }).click()
     await secondaryDialog.getByRole('button', { name: '下跌', exact: true }).click()
     rejectDuplicateFollowup = true
+    const soundsBeforeDuplicate = await page.evaluate(() => window.__alertSoundPlays.length)
     await secondaryDialog.getByRole('button', { name: '确定', exact: true }).click()
     await page.getByText('已有完全相同的条件单，请修改固定条件或变换条件后再保存', { exact: true }).waitFor()
     assert.equal(await secondaryDialog.isVisible(), true)
     assert.equal(await secondaryDialog.getByRole('button', { name: '空空死叉', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(await page.locator('.followup-rule').count(), 1)
     assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00')
-    assert.equal(await page.evaluate(() => window.__followupTones), 0)
+    assert.equal(await page.evaluate(() => window.__alertSoundPlays.length), soundsBeforeDuplicate)
     await secondaryDialog.getByRole('button', { name: '取消', exact: true }).click()
     rejectDuplicateFollowup = false
     results.push('重复条件返回明确提示，保留设置及原条件单、触发时间，不新增行也不重复响铃')
@@ -469,7 +476,7 @@ async function main() {
     await page.waitForFunction(() => document.querySelectorAll('.followup-rule').length === 2)
     assert.equal(await page.locator('.followup-list').isVisible(), false)
     assert.ok(await followupPanel.evaluate(node => node.getBoundingClientRect().height < 80))
-    const tonesWhileCollapsed = await page.evaluate(() => window.__followupTones)
+    const tonesWhileCollapsed = await page.evaluate(() => window.__alertSoundPlays.length)
     followupRules[0].last_triggered_at = '2026-10-23T13:30:00+08:00'
     followupRules[0].trigger_count += 1
     followupNotifications.push(structuredClone(followupRules[0]))
@@ -477,7 +484,7 @@ async function main() {
     assert.equal(await page.locator('.followup-rule').count(), 2)
     assert.equal(await page.locator('.followup-popup').count(), 1)
     assert.equal(await page.locator('.followup-list').isVisible(), false)
-    assert.equal(await page.evaluate(() => window.__followupTones), tonesWhileCollapsed + 6)
+    assert.equal(await page.evaluate(() => window.__alertSoundPlays.length), tonesWhileCollapsed + 5)
     assert.ok(await page.locator('.followup-popup').evaluate(node => node.scrollHeight <= node.clientHeight + 1))
     await page.getByRole('button', { name: '关闭二级预警提示', exact: true }).click()
     await followupPanel.screenshot({ path: path.join(screenshotDir, 'pxyfutures-followup-collapsed.png') })
@@ -558,6 +565,63 @@ async function main() {
     }
     assert.deepEqual(errors, [])
     results.push('八种桌面和手机宽度二级面板无左右滚动、桌面时间完整、单行分栏，合约代码与按钮可见、无页面异常')
+    await page.setViewportSize({ width: 1440, height: 1100 })
+    for (const [index, label] of ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡'].entries()) {
+      const time = new Date(Date.now() - 20000 + index * 1000).toISOString()
+      const current = { ...signal(0, fixture[0].contracts[0], periods[1]), label, cross_time: time, confirmed_bar_time: time }
+      const before = await page.evaluate(() => window.__alertSoundPlays.length)
+      await send([current])
+      const played = await page.evaluate(start => window.__alertSoundPlays.slice(start), before)
+      assert.equal(played.length, 5, `${label}必须播放5遍`)
+      const kind = index < 3 ? 'Buy' : 'Sell'
+      assert.ok(played.every(src => new RegExp(`/${kind}-.*\\.wav$`).test(src)), `${label}声音不匹配`)
+      await send([current])
+      assert.equal(await page.evaluate(() => window.__alertSoundPlays.length), before + 5, '重复推送不能重响')
+    }
+    for (const label of ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡']) {
+      const before = await page.evaluate(() => window.__alertSoundPlays.length)
+      followupRules[0].last_triggered_state = label
+      followupRules[0].trigger_count += 1
+      followupNotifications.push(structuredClone(followupRules[0]))
+      await page.waitForFunction(expected => window.__alertSoundPlays.length >= expected, before + 5, { timeout: 6000 })
+      const played = await page.evaluate(start => window.__alertSoundPlays.slice(start), before)
+      assert.equal(played.length, 5)
+      const kind = ['上涨', '回调', '多震荡'].includes(label) ? 'Buy' : 'Sell'
+      assert.ok(played.every(src => new RegExp(`/${kind}-.*\\.wav$`).test(src)), `二级实际${label}声音不匹配`)
+      await page.getByRole('button', { name: '关闭二级预警提示', exact: true }).click()
+    }
+    const decoded = await page.evaluate(async () => {
+      const context = new AudioContext()
+      try {
+        const urls = [...document.querySelectorAll('audio')].map(node => node.src)
+        const assets = [...new Set(window.__alertSoundPlays)]
+        return await Promise.all([...new Set([...urls, ...assets])].map(async url => {
+          const response = await fetch(url)
+          const buffer = await context.decodeAudioData(await response.arrayBuffer())
+          return { duration: buffer.duration, audible: buffer.getChannelData(0).some(value => Math.abs(value) > .001) }
+        }))
+      } finally { await context.close() }
+    })
+    assert.equal(decoded.length, 2)
+    assert.ok(decoded.every(item => item.duration > 0 && item.audible), '用户音频必须可解码且包含声音')
+    results.push('一级与二级六种实际状态分别选择Buy或Sell且完整5遍，重复消息不重响，两份用户WAV可解码且非静音')
+    await page.evaluate(() => {
+      window.__nativeAudioEnds = []
+      HTMLMediaElement.prototype.play = function () {
+        if (!this.muted) this.addEventListener('ended', () => window.__nativeAudioEnds.push(new URL(this.src).pathname), { once: true })
+        return window.__nativeMediaPlay.call(this)
+      }
+    })
+    await page.locator('.followup-header').click()
+    followupRules[0].last_triggered_state = '上涨'
+    followupRules[0].trigger_count += 1
+    followupNotifications.push(structuredClone(followupRules[0]))
+    await page.waitForFunction(() => window.__nativeAudioEnds.length === 5, null, {
+      timeout: Math.ceil(Math.max(...decoded.map(item => item.duration)) * 5000 + 12000),
+    })
+    assert.ok(await page.evaluate(() => window.__nativeAudioEnds.every(src => /\/Buy-.*\.wav$/.test(src))))
+    results.push('恢复浏览器原生音频播放后，实际收到Buy音频完整结束事件5次')
+    assert.deepEqual(errors, [])
     console.log(JSON.stringify({ passed: results.length, results }, null, 2))
   } finally { await context.close(); await browser.close() }
 }

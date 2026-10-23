@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --experimental-strip-types --test tests/alertCounter.test.ts",
+    "test": "node --experimental-strip-types --test tests/alertCounter.test.ts tests/alertSound.test.ts",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview"
   },
