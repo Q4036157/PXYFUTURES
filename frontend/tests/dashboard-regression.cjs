@@ -122,6 +122,29 @@ async function main() {
     await page.getByRole('button', { name: '关闭预警弹窗', exact: true }).click()
     await page.locator('.market-alert-popup').waitFor({ state: 'detached' })
   }
+  const assertViewportDialog = async dialog => {
+    await dialog.waitFor()
+    await page.waitForTimeout(350)
+    const fit = await dialog.evaluate(root => {
+      const node = root.matches('.followup-dialog') ? root : root.querySelector('.followup-dialog')
+      const bounds = node.getBoundingClientRect()
+      const overlay = node.closest('.el-overlay').getBoundingClientRect()
+      const footer = node.querySelector('.el-dialog__footer').getBoundingClientRect()
+      const button = node.querySelector('.el-dialog__footer button:last-child')
+      const action = button.getBoundingClientRect()
+      return {
+        outsidePanel: !node.closest('.followup-center'),
+        overlayFillsViewport: Math.abs(overlay.top) < 1 && Math.abs(overlay.left) < 1
+          && Math.abs(overlay.width - innerWidth) < 1 && Math.abs(overlay.height - innerHeight) < 1,
+        centered: Math.abs((bounds.left + bounds.right) / 2 - innerWidth / 2) < 2
+          && Math.abs((bounds.top + bounds.bottom) / 2 - innerHeight / 2) < 2,
+        fits: bounds.top >= 11 && bounds.bottom <= innerHeight - 11 && bounds.left >= 11 && bounds.right <= innerWidth - 11,
+        footerVisible: footer.top >= bounds.top && footer.bottom <= bounds.bottom
+          && button.contains(document.elementFromPoint((action.left + action.right) / 2, (action.top + action.bottom) / 2)),
+      }
+    })
+    assert.ok(Object.values(fit).every(Boolean), `弹窗必须独立居中且底部按钮完整可见：${JSON.stringify(fit)}`)
+  }
   const send = async items => {
     scanSignals = items
     sockets.at(-1).send(JSON.stringify({ type: 'snapshot', signals: items, requested: items.length, failed: 0, trigger: 'bar_closed', server_sent_at: new Date().toISOString() }))
@@ -356,6 +379,7 @@ async function main() {
     await firstSource.click()
     const secondaryDialog = page.getByRole('dialog', { name: '设置二级预警', exact: true })
     await secondaryDialog.waitFor()
+    await assertViewportDialog(secondaryDialog)
     assert.equal(await secondaryDialog.locator('.alert-control-row').count(), 3)
     assert.equal(await secondaryDialog.getByRole('button', { name: '15分钟', exact: true }).isDisabled(), true)
     assert.equal(await secondaryDialog.getByRole('button', { name: '确定', exact: true }).isDisabled(), true)
@@ -444,6 +468,7 @@ async function main() {
     await page.locator('.followup-source').first().click()
     const reviewDialog = page.getByRole('dialog', { name: '固定条件对比' })
     await reviewDialog.waitFor()
+    await assertViewportDialog(reviewDialog)
     assert.ok((await reviewDialog.innerText()).includes('当前已收盘状态'))
     assert.ok((await reviewDialog.innerText()).includes('空空死叉'))
     await reviewDialog.screenshot({ path: path.join(screenshotDir, 'pxyfutures-fixed-condition-review.png') })
@@ -565,6 +590,57 @@ async function main() {
     }
     assert.deepEqual(errors, [])
     results.push('八种桌面和手机宽度二级面板无左右滚动、桌面时间完整、单行分栏，合约代码与按钮可见、无页面异常')
+    const savedRules = structuredClone(followupRules)
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 720 })
+      const heights = []
+      for (const count of [0, 2, 7, 9]) {
+        followupRules = Array.from({ length: count }, (_, index) => ({ ...structuredClone(savedRules[0]), id: index + 100 }))
+        await page.reload()
+        await page.waitForFunction(expected => document.querySelectorAll('.followup-rule').length === expected, count)
+        await page.locator('.followup-list').waitFor({ state: 'visible' })
+        const layout = await page.locator('.followup-list').evaluate(node => {
+          const viewport = node.getBoundingClientRect()
+          const header = node.querySelector('.followup-columns').getBoundingClientRect()
+          const rows = [...node.querySelectorAll('.followup-rule')].map(row => row.getBoundingClientRect())
+          return {
+            height: viewport.height,
+            fullyVisible: rows.filter(row => row.top >= header.bottom - 1 && row.bottom <= viewport.bottom + 1).length,
+            scrolls: node.scrollHeight > node.clientHeight + 1,
+            noHorizontalScroll: node.scrollWidth <= node.clientWidth + 1,
+          }
+        })
+        heights.push(layout.height)
+        assert.equal(layout.fullyVisible, Math.min(count, 7), `必须完整显示最多7条：${width}/${count}`)
+        assert.equal(layout.scrolls, count > 7, `只有超过7条才滚动：${width}/${count}`)
+        assert.ok(layout.noHorizontalScroll)
+        if (count === 9) {
+          await page.locator('.followup-list').evaluate(node => { node.scrollTop = node.scrollHeight })
+          assert.ok(await page.locator('.followup-rule').last().evaluate(node => {
+            const row = node.getBoundingClientRect(), viewport = node.parentElement.getBoundingClientRect()
+            return row.bottom <= viewport.bottom + 1 && row.top >= viewport.top
+          }), '最后一条必须能滚动到完整显示')
+        }
+      }
+      assert.ok(heights[0] < heights[1] && heights[1] < heights[2] && Math.abs(heights[2] - heights[3]) < 1, '少于7条随内容收缩，超过7条高度不增加')
+    }
+    followupRules = savedRules
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    for (const viewport of [{ width: 1440, height: 600 }, { width: 390, height: 600 }]) {
+      await page.setViewportSize(viewport)
+      await page.locator('.alert-result-link').first().click()
+      await assertViewportDialog(secondaryDialog)
+      await page.screenshot({ path: path.join(screenshotDir, `pxyfutures-dialog-viewport-${viewport.width}.png`) })
+      await secondaryDialog.getByRole('button', { name: '取消', exact: true }).click()
+      await secondaryDialog.waitFor({ state: 'hidden' })
+      await page.locator('.followup-source').first().click()
+      await assertViewportDialog(reviewDialog)
+      await page.screenshot({ path: path.join(screenshotDir, `pxyfutures-review-viewport-${viewport.width}.png`) })
+      await reviewDialog.getByRole('button', { name: '关闭', exact: true }).click()
+      await reviewDialog.waitFor({ state: 'hidden' })
+    }
+    results.push('二级列表0/2/7/9条按内容收缩、完整容纳7条及超出滚动；两类弹窗在桌面和手机短窗口独立居中且底部按钮可点击')
     await page.setViewportSize({ width: 1440, height: 1100 })
     for (const [index, label] of ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡'].entries()) {
       const time = new Date(Date.now() - 20000 + index * 1000).toISOString()

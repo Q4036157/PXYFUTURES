@@ -249,7 +249,7 @@ defineExpose({ open })
       <p v-if="popupItems.length > 5">另有 {{ popupItems.length - 5 }} 条，请查看条件单</p>
     </aside>
 
-    <el-dialog v-model="dialogVisible" class="followup-dialog" title="设置二级预警" width="860px" align-center :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close>
+    <el-dialog v-model="dialogVisible" class="followup-dialog" title="设置二级预警" width="860px" append-to-body align-center :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close>
       <p v-if="source" class="followup-dialog-source">固定条件：{{ source.symbol }} · {{ source.period.label }} · {{ conditionText(source) }} · {{ source.label }}</p>
       <div class="alert-control-row"><strong>预警周期</strong><div class="alert-options"><button v-for="period in commonPeriods" :key="period.durationSeconds" type="button" :disabled="saving || !hasPeriod(period.durationSeconds)" :title="hasPeriod(period.durationSeconds) ? period.label : '请先为该合约配置此周期的均线参数'" :class="{ active: duration === period.durationSeconds }" :aria-pressed="duration === period.durationSeconds" @click="duration = period.durationSeconds">{{ period.label }}</button></div></div>
       <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :disabled="saving" :class="{ active: conditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="conditions.includes(condition)" @click="conditions = toggle(conditions, condition)">{{ condition }}</button></div></div>
@@ -258,7 +258,7 @@ defineExpose({ open })
       <template #footer><el-button :disabled="saving" @click="dialogVisible = false">取消</el-button><el-button type="primary" :loading="saving" :disabled="!duration" @click="save">确定</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="reviewVisible" class="followup-dialog followup-review-dialog" title="固定条件对比" width="640px" align-center :close-on-click-modal="!replacing" :close-on-press-escape="!replacing" :show-close="!replacing" destroy-on-close>
+    <el-dialog v-model="reviewVisible" class="followup-dialog followup-review-dialog" title="固定条件对比" width="640px" append-to-body align-center :close-on-click-modal="!replacing" :close-on-press-escape="!replacing" :show-close="!replacing" destroy-on-close>
       <div v-if="review" class="followup-review">
         <div><strong>已保存条件</strong><p>{{ sourceText(review) }}</p></div>
         <div :class="{ 'source-review-changed': review.source_changed }"><strong>当前已收盘状态</strong><p>{{ currentSourceText(review) }}</p><small>{{ review.source_changed == null ? '等待有效收盘行情' : review.source_changed ? '固定条件已变化，请结合盘面判断是否继续等待。' : '当前状态与已保存条件一致。' }}</small></div>
