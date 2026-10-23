@@ -42,7 +42,9 @@ class MarketSyncEvent:
     received_at_ns: int
 
 
-def build_market_sync_jobs(contracts: list[ContractConfig]) -> list[MarketSyncJob]:
+def build_market_sync_jobs(
+    contracts: list[ContractConfig], followup_rules: list[dict[str, object]] | None = None,
+) -> list[MarketSyncJob]:
     """把派生周期合并为最少的天勤基础K线订阅。"""
     requested_counts: dict[tuple[str, int], int] = {}
     for contract in contracts:
@@ -69,6 +71,13 @@ def build_market_sync_jobs(contracts: list[ContractConfig]) -> list[MarketSyncJo
                 requested_counts.get(key, 0),
                 source_count,
             )
+
+    # 日线的时间戳为交易日零点，二级提醒需由该日日盘基础K线恢复真实收盘时刻。
+    symbols = {contract.id: contract.symbol for contract in contracts}
+    for rule in followup_rules or []:
+        if rule["duration_seconds"] == 86_400 and symbols.get(rule["contract_id"]) == rule["symbol"]:
+            key = (str(rule["symbol"]), 300)
+            requested_counts[key] = max(requested_counts.get(key, 0), 3000)
 
     return [
         MarketSyncJob(symbol=symbol, duration_seconds=duration_seconds, count=count)
@@ -129,7 +138,8 @@ async def run_market_sync_loop(
         now = monotonic()
         if now >= refresh_deadline:
             contracts = await asyncio.to_thread(repository.list_all_contracts)
-            jobs = build_market_sync_jobs(contracts)
+            followup_rules = await asyncio.to_thread(repository.list_followup_alerts)
+            jobs = build_market_sync_jobs(contracts, followup_rules)
             refresh_deadline = now + interval_seconds
             logger.info("后台行情订阅已刷新: 候选基础订阅=%d", len(jobs))
 

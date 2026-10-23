@@ -73,3 +73,23 @@ export interface ContractSignals {
   warnings?: string[]
   market_status?: 'active' | 'expired' | 'unknown'
 }
+
+export interface FollowupRule {
+  id: number
+  contract_id: number
+  symbol: string
+  source: {
+    duration_seconds: number
+    period_label: string
+    condition: string | null
+    state: string
+  }
+  duration_seconds: number
+  conditions: string[]
+  states: string[]
+  last_triggered_at: string | null
+  last_bar_time: string | null
+  matched: boolean
+  trigger_count: number
+  status: string
+}

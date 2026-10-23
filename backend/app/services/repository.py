@@ -1,6 +1,7 @@
 """合约与周期均线配置的 SQLite 持久化。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -115,6 +116,24 @@ class ConfigRepository:
                     last_synced_at_ns INTEGER NOT NULL,
                     PRIMARY KEY(symbol, duration_seconds)
                 );
+                CREATE TABLE IF NOT EXISTS followup_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    contract_id INTEGER NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+                    symbol TEXT NOT NULL,
+                    source_json TEXT NOT NULL,
+                    duration_seconds INTEGER NOT NULL,
+                    conditions_json TEXT NOT NULL,
+                    states_json TEXT NOT NULL,
+                    created_at_ns INTEGER NOT NULL,
+                    last_bar_time TEXT,
+                    matched INTEGER NOT NULL DEFAULT 0,
+                    last_triggered_at TEXT,
+                    trigger_count INTEGER NOT NULL DEFAULT 0,
+                    notified_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_followup_alerts_user
+                    ON followup_alerts(user_id, id);
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(period_configs)")}
@@ -364,6 +383,81 @@ class ConfigRepository:
                    WHERE contract_id = ? AND duration_seconds = ?
                    AND EXISTS (SELECT 1 FROM contracts WHERE id = ? AND user_id = ?)""",
                 (note, contract_id, duration_seconds, contract_id, user_id),
+            ).rowcount > 0
+
+    def create_followup_alert(
+        self, user_id: str, contract_id: int, symbol: str, source: dict[str, object],
+        duration_seconds: int, conditions: list[str], states: list[str],
+    ) -> int:
+        """条件单独立保存，同一品种允许创建多条不同规则。"""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO followup_alerts(
+                    user_id,contract_id,symbol,source_json,duration_seconds,
+                    conditions_json,states_json,created_at_ns
+                ) VALUES (?,?,?,?,?,?,?,?)""",
+                (user_id, contract_id, symbol, json.dumps(source, ensure_ascii=False),
+                 duration_seconds, json.dumps(conditions, ensure_ascii=False),
+                 json.dumps(states, ensure_ascii=False), time_ns()),
+            )
+            return int(cursor.lastrowid)
+
+    def list_followup_alerts(self, user_id: str | None = None) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM followup_alerts"
+                + (" WHERE user_id = ?" if user_id is not None else "") + " ORDER BY id",
+                (user_id,) if user_id is not None else (),
+            ).fetchall()
+            return [self._followup_from_row(row) for row in rows]
+
+    @staticmethod
+    def _followup_from_row(row: sqlite3.Row) -> dict[str, object]:
+        result = dict(row)
+        result["source"] = json.loads(result.pop("source_json"))
+        result["conditions"] = json.loads(result.pop("conditions_json"))
+        result["states"] = json.loads(result.pop("states_json"))
+        result["matched"] = bool(result["matched"])
+        return result
+
+    def advance_followup_alert(
+        self, rule_id: int, symbol: str, bar_time: str, matched: bool, closed_at: str,
+    ) -> bool:
+        """原子推进收盘游标；同一根或迟到旧K线不能再次触发。"""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM followup_alerts WHERE id = ? AND symbol = ?", (rule_id, symbol),
+            ).fetchone()
+            if row is None or (row["last_bar_time"] and bar_time <= row["last_bar_time"]):
+                return False
+            triggered = matched and not row["matched"]
+            conn.execute(
+                """UPDATE followup_alerts SET last_bar_time = ?, matched = ?,
+                   last_triggered_at = CASE WHEN ? THEN ? ELSE last_triggered_at END,
+                   trigger_count = trigger_count + ? WHERE id = ?""",
+                (bar_time, int(matched), int(triggered), closed_at, int(triggered), rule_id),
+            )
+            return triggered
+
+    def claim_followup_notifications(self, user_id: str) -> list[dict[str, object]]:
+        """同账号多个页面只领取一次；离线期间保留各条件单的最近触发。"""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """SELECT * FROM followup_alerts WHERE user_id = ?
+                   AND trigger_count > notified_count ORDER BY id""", (user_id,),
+            ).fetchall()
+            conn.execute(
+                """UPDATE followup_alerts SET notified_count = trigger_count
+                   WHERE user_id = ? AND trigger_count > notified_count""", (user_id,),
+            )
+            return [self._followup_from_row(row) for row in rows]
+
+    def delete_followup_alert(self, user_id: str, rule_id: int) -> bool:
+        with self._connect() as conn:
+            return conn.execute(
+                "DELETE FROM followup_alerts WHERE id = ? AND user_id = ?", (rule_id, user_id),
             ).rowcount > 0
 
     def load_kline_bars(self, symbol: str, duration_seconds: int, count: int) -> list[tuple[int, float]]:

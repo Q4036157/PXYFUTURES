@@ -6,6 +6,9 @@ import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
 import { AlertCounter, alertEventKey, mergeAlertSnapshot } from '@/lib/alertCounter'
 import alertSoundUrl from '@/assets/ok3.wav?url'
+import FollowupAlertPanel from '@/components/FollowupAlertPanel.vue'
+import { alertConditionOptions, alertStateOptions, commonPeriods } from '@/lib/alertOptions'
+import type { AlertCondition, AlertState } from '@/lib/alertOptions'
 import type {
   AlertScanResult,
   AlertSignalSnapshot,
@@ -17,15 +20,11 @@ import type {
   SignalSnapshot,
 } from '@/types/futures'
 
-type AlertCondition =
-  | '多多金叉' | '多空金叉' | '空多金叉' | '空空金叉'
-  | '多多死叉' | '多空死叉' | '空多死叉' | '空空死叉'
-
-type AlertState = '上涨' | '回调' | '多震荡' | '下跌' | '反弹' | '空震荡'
 type PanelKey = 'groups' | 'setup' | 'signals' | 'alerts'
 type PanelSize = { width?: number; height?: number }
 
 const contracts = ref<ContractConfig[]>([])
+const followupPanel = ref<InstanceType<typeof FollowupAlertPanel> | null>(null)
 const contractGroups = ref<ContractGroup[]>([])
 const activeGroupId = ref<number | null>(null)
 const activeGroup = computed(() => contractGroups.value.find((group) => group.id === activeGroupId.value))
@@ -107,7 +106,6 @@ const platformReturnVisible = window.location.pathname === '/futures-app'
   || window.location.pathname.startsWith('/futures-app/')
   || window.self !== window.top
 
-const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡']
 const alertPreferencesKey = 'pxy-futures-alert-preferences-v1'
 const panelLayoutKey = 'pxy-futures-panel-layout-v3'
 const collapsedPanels = ref<Record<PanelKey, boolean>>({
@@ -135,23 +133,6 @@ const panelRefs = {
 let panelResizeObserver: ResizeObserver | null = null
 const draggedContractId = ref<number | null>(null)
 const draggedSourceGroupId = ref<number | null>(null)
-
-const commonPeriods = [
-  { label: '日线', durationSeconds: 86400 },
-  { label: '4小时', durationSeconds: 14400 },
-  { label: '2小时', durationSeconds: 7200 },
-  { label: '1小时', durationSeconds: 3600 },
-  { label: '30分钟', durationSeconds: 1800 },
-  { label: '15分钟', durationSeconds: 900 },
-  { label: '10分钟', durationSeconds: 600 },
-  { label: '5分钟', durationSeconds: 300 },
-  { label: '3分钟', durationSeconds: 180 },
-]
-
-const alertConditionOptions: AlertCondition[] = [
-  '多多金叉', '多空金叉', '空多金叉', '空空金叉',
-  '多多死叉', '多空死叉', '空多死叉', '空空死叉',
-]
 
 const selectedContract = computed(() => contracts.value.find((item) => item.id === selectedId.value) || null)
 const selectedSignal = computed(() => (
@@ -1305,9 +1286,9 @@ onBeforeUnmount(() => {
             <section v-for="group in alertPeriodGroups" :key="group.durationSeconds" class="alert-period-group" :aria-label="`${group.label}预警`">
               <h3 class="alert-period-heading"><span>{{ group.label }}</span><small>{{ group.signals.length }} 条</small></h3>
               <div v-if="group.signals.length" class="alert-result-grid">
-                <div v-for="signal in group.signals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" class="alert-result-item">
+                <button v-for="signal in group.signals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" type="button" class="alert-result-item alert-result-link" :title="`为 ${alertText(signal)} 设置二级预警`" @click="followupPanel?.open(signal)">
                   <span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" :title="alertCountTitle(signal)">+{{ alertCount(signal) }}</span>
-                </div>
+                </button>
               </div>
               <p v-else class="alert-period-empty">暂无匹配预警</p>
             </section>
@@ -1316,6 +1297,7 @@ onBeforeUnmount(() => {
           <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
         </div>
       </section>
+      <FollowupAlertPanel ref="followupPanel" :contracts="contracts" />
     </section>
 
       </div>

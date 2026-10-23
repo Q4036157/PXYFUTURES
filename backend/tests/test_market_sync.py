@@ -9,6 +9,12 @@ from app.services.market_sync import (
 from app.services.repository import ContractConfig, PeriodConfig
 
 
+class EmptyFollowups:
+    @staticmethod
+    def list_followup_alerts() -> list[dict[str, object]]:
+        return []
+
+
 def _period(duration_seconds: int, m4: int) -> PeriodConfig:
     return PeriodConfig(
         id=None,
@@ -56,7 +62,7 @@ def test_build_jobs_deduplicates_periods_that_share_a_base_series() -> None:
 
 
 def test_sync_failure_does_not_block_later_jobs() -> None:
-    class Repository:
+    class Repository(EmptyFollowups):
         @staticmethod
         def list_all_contracts() -> list[ContractConfig]:
             return [
@@ -84,7 +90,7 @@ def test_sync_failure_does_not_block_later_jobs() -> None:
 def test_sync_loop_can_stop_after_one_cycle() -> None:
     stop_event = asyncio.Event()
 
-    class Repository:
+    class Repository(EmptyFollowups):
         @staticmethod
         def list_all_contracts() -> list[ContractConfig]:
             stop_event.set()
@@ -104,7 +110,7 @@ def test_sync_loop_publishes_rollover_without_fixed_sleep() -> None:
     stop_event = asyncio.Event()
     received = []
 
-    class Repository:
+    class Repository(EmptyFollowups):
         @staticmethod
         def list_all_contracts() -> list[ContractConfig]:
             return [ContractConfig(1, "CZCE.UR701", "UR701", [_period(180, 200)])]
@@ -142,7 +148,7 @@ def test_sync_loop_publishes_rollover_without_fixed_sleep() -> None:
 def test_sync_loop_waits_for_credentials_change_without_retry_storm() -> None:
     stop_event = asyncio.Event()
 
-    class Repository:
+    class Repository(EmptyFollowups):
         @staticmethod
         def list_all_contracts() -> list[ContractConfig]:
             return [ContractConfig(1, "CZCE.UR701", "UR701", [_period(180, 200)])]

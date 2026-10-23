@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 
@@ -162,6 +163,8 @@ def _cached_source_request(period: PeriodConfig) -> tuple[int, int]:
 def _scan_cached_alert_jobs(
     repository: ConfigRepository,
     jobs: list[tuple[ContractConfig, PeriodConfig]],
+    *,
+    replay_since: dict[tuple[int, int], str | None] | None = None,
 ) -> tuple[list[dict[str, object]], int]:
     """按合约和基础周期合并数据库读取，再恢复各预警周期状态。"""
     source_counts: dict[tuple[str, int], int] = {}
@@ -176,6 +179,7 @@ def _scan_cached_alert_jobs(
     }
     last_snapshots: dict[tuple[int, int], dict[str, object]] = {}
     last_errors: set[tuple[int, int]] = set()
+    histories: dict[tuple[int, int], MarketBars] = {}
 
     for _attempt in range(12):
         sources: dict[tuple[str, int], MarketBars] = {}
@@ -205,6 +209,7 @@ def _scan_cached_alert_jobs(
                 updated_at_ns=source.updated_at_ns,
             )
             job_key = (contract.id, period.duration_seconds)
+            histories[job_key] = market_bars
             try:
                 snapshot = _snapshot_from_market_bars(
                     contract.symbol,
@@ -237,8 +242,13 @@ def _scan_cached_alert_jobs(
             no_cross_in_window = snapshot["cross_type"] is None
             requested_count = source_counts[source_key]
             source_complete = len(source.bars) < requested_count
+            cursor = replay_since.get(job_key) if replay_since is not None else None
+            needs_replay_history = bool(
+                cursor and len(bars) > config.required_bars
+                and _iso_time(bars[config.required_bars].timestamp_ns) > cursor
+            )
             if (
-                (at_history_boundary or no_cross_in_window)
+                (at_history_boundary or no_cross_in_window or needs_replay_history)
                 and not source_complete
                 and requested_count < _MAX_CACHED_BASE_BARS
             ):
@@ -251,6 +261,76 @@ def _scan_cached_alert_jobs(
                 _MAX_CACHED_BASE_BARS,
                 source_counts[source_key] * 2,
             )
+
+    if replay_since is not None:
+        replayed: list[dict[str, object]] = []
+        daily_sources: dict[str, list[int]] = {}
+        for contract, period in jobs:
+            key = (contract.id, period.duration_seconds)
+            latest = last_snapshots.get(key)
+            if latest is None or latest["data_status"] != "current":
+                continue
+            cursor = replay_since.get(key)
+            history = histories[key]
+            base_duration, _ = _cached_source_request(period)
+            source = sources[(contract.symbol, base_duration)]
+            source_times = [bar.timestamp_ns for bar in source.bars]
+            required_bars = MovingAverageConfig(
+                m4=period.m4, m3=period.m3, m2=period.m2, m1=period.m1,
+            ).required_bars
+            if cursor is None:
+                indices = [len(history.bars) - 2]
+            else:
+                indices = [
+                    index for index in range(len(history.bars) - 1)
+                    if _iso_time(history.bars[index].timestamp_ns) > cursor
+                ]
+            for index in indices:
+                if index < required_bars - 1:
+                    continue
+                if index == len(history.bars) - 2:
+                    item = dict(latest)
+                else:
+                    item = {
+                        "contract_id": contract.id, "symbol": contract.symbol, "name": contract.name,
+                        **_snapshot_from_market_bars(
+                            contract.symbol, period,
+                            MarketBars(
+                                bars=history.bars[:index + 2], source="cache",
+                                updated_at_ns=history.updated_at_ns,
+                            ),
+                            confirmed_only=True,
+                        ),
+                    }
+                # 由实际参与聚合的最后一根基础K线取收盘时间，午休、夜盘间隔不计入。
+                if period.duration_seconds < 86_400:
+                    start = history.bars[index].timestamp_ns
+                    end = history.bars[index + 1].timestamp_ns
+                    last_base_index = bisect_left(source_times, end) - 1
+                    if last_base_index >= 0 and source_times[last_base_index] >= start:
+                        item["closed_at"] = _iso_time(
+                            source_times[last_base_index] + base_duration * 1_000_000_000,
+                        )
+                else:
+                    if contract.symbol not in daily_sources:
+                        daily_sources[contract.symbol] = [
+                            timestamp for timestamp, _close
+                            in repository.load_kline_bars(contract.symbol, 300, 3000)
+                        ]
+                    intraday = daily_sources[contract.symbol]
+                    day = datetime.fromtimestamp(
+                        history.bars[index].timestamp_ns / 1_000_000_000, tz=_CHINA_TZ,
+                    ).replace(hour=0, minute=0, second=0, microsecond=0)
+                    # 夜盘属于下一交易日，取当日日盘范围内最后的实际基础K线。
+                    begin = int((day + timedelta(hours=6)).timestamp()) * 1_000_000_000
+                    end = int((day + timedelta(hours=18)).timestamp()) * 1_000_000_000
+                    last_index = bisect_left(intraday, end) - 1
+                    if last_index >= 0 and intraday[last_index] >= begin:
+                        item["closed_at"] = _iso_time(intraday[last_index] + 300 * 1_000_000_000)
+                if "closed_at" not in item:
+                    continue
+                replayed.append(item)
+        return replayed, len(last_errors)
 
     snapshots = [
         snapshot

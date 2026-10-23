@@ -12,13 +12,22 @@ function signal(minutes = 0, contract = fixture[0].contracts[0], period = period
   return { contract_id: contract.id, symbol: contract.symbol, name: contract.name, period, trend: { m3: '空', m4: '空' }, cross_type: '金叉', cross_time: time, label: '反弹', state_since: time, state_bar_count: 1, ma_values: { M1: 1, M2: 2, M3: 3, M4: 4 }, bar_close: 1, bar_time: time, confirmed_bar_time: time, confirmed_at: new Date().toISOString(), data_source: 'live', data_status: 'current', data_updated_at: time }
 }
 async function main() {
+  const screenshotDir = process.env.PXY_SCREENSHOT_DIR || require('node:os').tmpdir()
   const browser = await chromium.launch({ channel: 'msedge', headless: true })
   const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } })
   const page = await context.newPage()
   const state = structuredClone(fixture), errors = [], orderRequests = [], results = []
   let sockets = [], scanSignals = [], failOrder = false, releaseOrder = null, holdOrder = false
+  let followupRules = [], followupNotifications = [], followupRequests = [], nextFollowupId = 1
+  let followupAlreadyMatches = false, failFollowupSave = false, failFollowupDelete = false
   page.on('pageerror', error => errors.push(error.message))
   await page.addInitScript(() => {
+    window.__followupTones = 0
+    const createOscillator = AudioContext.prototype.createOscillator
+    AudioContext.prototype.createOscillator = function (...args) {
+      window.__followupTones += 1
+      return createOscillator.apply(this, args)
+    }
     if (!localStorage.getItem('pxy-futures-alert-preferences-v1')) {
       localStorage.setItem('pxy-futures-alert-preferences-v1', JSON.stringify({ durations: [300, 600], conditions: [], states: [] }))
     }
@@ -29,7 +38,30 @@ async function main() {
     if (url.pathname.includes('/api/')) {
       const body = request.postDataJSON()
       let data
-      if (last === 'groups') data = state
+      if (url.pathname.includes('/api/followup-alerts')) {
+        if (last === 'claim') {
+          data = { notifications: followupNotifications.splice(0) }
+        } else if (method === 'DELETE') {
+          if (failFollowupDelete) return route.fulfill({ status: 500, json: { detail: '模拟二级条件删除失败' } })
+          followupRules = followupRules.filter(rule => rule.id !== Number(last))
+          followupNotifications = followupNotifications.filter(rule => rule.id !== Number(last))
+          return route.fulfill({ status: 204 })
+        } else if (method === 'POST') {
+          if (failFollowupSave) return route.fulfill({ status: 500, json: { detail: '模拟二级条件保存失败' } })
+          followupRequests.push(body)
+          const rule = {
+            ...body, id: nextFollowupId++, symbol: fixture[0].contracts[0].symbol,
+            source: { ...body.source, period_label: `${body.source.duration_seconds / 60}分钟` },
+            last_triggered_at: followupAlreadyMatches ? '2026-10-23T12:00:00+08:00' : null,
+            last_bar_time: null, matched: followupAlreadyMatches,
+            trigger_count: followupAlreadyMatches ? 1 : 0,
+            status: followupAlreadyMatches ? '条件已满足' : '监控中',
+          }
+          followupRules.push(rule)
+          if (followupAlreadyMatches) followupNotifications.push(structuredClone(rule))
+          data = { created_id: rule.id, rules: followupRules }
+        } else data = { rules: followupRules }
+      } else if (last === 'groups') data = state
       else if (last === 'order') {
         orderRequests.push(body.contract_ids)
         if (holdOrder) await new Promise(resolve => { releaseOrder = resolve })
@@ -221,11 +253,93 @@ async function main() {
     await page.reload()
     await page.waitForSelector('.contract-expiry-tag')
     await page.waitForSelector('.alert-new-badge')
-    const screenshotDir = process.env.PXY_SCREENSHOT_DIR || require('node:os').tmpdir()
+    await page.setViewportSize({ width: 1440, height: 1100 })
+    if (await page.locator('.market-alert-popup').count()) await closePopup()
+    const firstSource = page.locator('.alert-result-link').first()
+    assert.equal(await firstSource.evaluate(node => node.tagName), 'BUTTON')
+    await firstSource.click()
+    const secondaryDialog = page.getByRole('dialog', { name: '设置二级预警', exact: true })
+    await secondaryDialog.waitFor()
+    assert.equal(await secondaryDialog.locator('.alert-control-row').count(), 3)
+    assert.equal(await secondaryDialog.getByRole('button', { name: '15分钟', exact: true }).isDisabled(), true)
+    assert.equal(await secondaryDialog.getByRole('button', { name: '确定', exact: true }).isDisabled(), true)
+    await secondaryDialog.getByRole('button', { name: '5分钟', exact: true }).click()
+    await secondaryDialog.getByRole('button', { name: '空空死叉', exact: true }).click()
+    await secondaryDialog.getByRole('button', { name: '下跌', exact: true }).click()
+    await secondaryDialog.screenshot({ path: path.join(screenshotDir, 'pxyfutures-followup-settings.png') })
+    failFollowupSave = true
+    await secondaryDialog.getByRole('button', { name: '确定', exact: true }).click()
+    await page.getByText('模拟二级条件保存失败', { exact: true }).waitFor()
+    assert.equal(await secondaryDialog.isVisible(), true)
+    failFollowupSave = false
+    followupAlreadyMatches = true
+    await secondaryDialog.getByRole('button', { name: '确定', exact: true }).click()
+    await secondaryDialog.waitFor({ state: 'hidden' })
+    await page.locator('.followup-popup').waitFor()
+    assert.deepEqual(followupRequests.at(-1).conditions, ['空空死叉'])
+    assert.deepEqual(followupRequests.at(-1).states, ['下跌'])
+    assert.equal(await page.locator('.followup-rule').count(), 1)
+    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00 触发')
+    assert.equal(await page.evaluate(() => window.__followupTones), 6)
+    const popupPosition = await page.locator('.followup-popup').evaluate(node => {
+      const popup = node.getBoundingClientRect(), panel = node.closest('.followup-center').getBoundingClientRect()
+      return { absolute: getComputedStyle(node).position === 'absolute', within: popup.left >= panel.left && popup.right <= panel.right + 1, top: Math.round(popup.top - panel.top) }
+    })
+    assert.ok(popupPosition.absolute && popupPosition.within && popupPosition.top >= 10 && popupPosition.top <= 12)
+    await page.locator('.followup-center').screenshot({ path: path.join(screenshotDir, 'pxyfutures-followup-trigger.png') })
+    assert.equal(await page.locator('.followup-center .alert-new-badge').count(), 0)
+    await page.getByRole('button', { name: '关闭二级预警提示', exact: true }).click()
+    await page.waitForTimeout(3200)
+    assert.equal(await page.locator('.followup-popup').count(), 0)
+    assert.equal(await page.evaluate(() => window.__followupTones), 6)
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00 触发')
+    assert.equal(await page.locator('.followup-popup').count(), 0)
+    assert.equal(await page.evaluate(() => window.__followupTones), 0)
+    results.push('一级整行可点击、三栏设置、保存失败保留选择、已满足立即提醒、独立提示音、红框内右上角提示、刷新不重响')
+    followupAlreadyMatches = false
+    await page.locator('.alert-result-link').first().click()
+    await secondaryDialog.waitFor()
+    await secondaryDialog.getByRole('button', { name: '10分钟', exact: true }).click()
+    await secondaryDialog.getByRole('button', { name: '反弹', exact: true }).click()
+    await secondaryDialog.getByRole('button', { name: '确定', exact: true }).click()
+    await secondaryDialog.waitFor({ state: 'hidden' })
+    assert.equal(await page.locator('.followup-rule').count(), 2)
+    assert.deepEqual(followupRequests.at(-1).conditions, [])
+    assert.equal(await page.locator('.followup-time').last().textContent(), '')
+    const twoConditions = await page.locator('.followup-target').allTextContents()
+    await alertPanel.getByRole('button', { name: '上涨', exact: true }).click()
+    assert.deepEqual(await page.locator('.followup-target').allTextContents(), twoConditions)
+    await alertPanel.getByRole('button', { name: '上涨', exact: true }).click()
+    followupRules[0].last_triggered_at = '2026-10-23T13:30:00+08:00'
+    followupRules[0].trigger_count += 1
+    followupNotifications.push(structuredClone(followupRules[0]))
+    await page.waitForFunction(() => document.querySelector('.followup-time')?.textContent.includes('13:30'), null, { timeout: 5000 })
+    assert.equal(await page.locator('.followup-rule').count(), 2)
+    assert.equal(await page.locator('.followup-popup').count(), 1)
+    await page.getByRole('button', { name: '关闭二级预警提示', exact: true }).click()
+    failFollowupDelete = true
+    await page.getByRole('button', { name: '删除二级条件单', exact: true }).first().click()
+    await page.getByText('模拟二级条件删除失败', { exact: true }).waitFor()
+    assert.equal(await page.locator('.followup-rule').count(), 2)
+    failFollowupDelete = false
+    await page.getByRole('button', { name: '删除二级条件单', exact: true }).first().click()
+    await page.waitForFunction(() => document.querySelectorAll('.followup-rule').length === 1)
+    assert.ok((await page.locator('.followup-target').textContent()).includes('10分钟'))
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    assert.equal(await page.locator('.followup-rule').count(), 1)
+    results.push('同品种多条独立条件、可只选状态、待触发时间留空、主筛选不影响条件单、再次触发更新原行、删除失败与独立删除持久化')
     for (const width of [1440, 1024, 960, 721, 720, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 })
       await page.waitForTimeout(100)
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `页面溢出：${width}`)
+      const followupBounds = await page.locator('.followup-center').evaluate(node => {
+        const bounds = node.getBoundingClientRect()
+        return { right: bounds.right, width: bounds.width, rowSingleLine: getComputedStyle(node.querySelector('.followup-rule-text')).whiteSpace === 'nowrap' }
+      })
+      assert.ok(followupBounds.right <= width && followupBounds.width > 0 && followupBounds.rowSingleLine, `二级监控布局异常：${width}`)
       const bounds = await page.locator('.contract-row').evaluateAll(rows => rows.map(row => ({
         row: row.getBoundingClientRect(),
         action: row.querySelector('.contract-actions').getBoundingClientRect(),

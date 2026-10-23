@@ -13,12 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, contracts, signals
+from app.api import auth, contracts, followup_alerts, signals
 from app.api import settings as settings_api
 from app.config import settings
 from app.market.tq_client import TqClient
 from app.services.alert_stream import AlertStreamService
-from app.services.market_sync import run_market_sync_loop
+from app.services.followup_alerts import FollowupAlertService
+from app.services.market_sync import MarketSyncEvent, run_market_sync_loop
 from app.services.repository import ConfigRepository
 from app.version import APP_VERSION
 
@@ -44,13 +45,26 @@ async def lifespan(app: FastAPI):
         app.state.config_repository,
         partial(signals.scan_cached_alerts_for_user, client=app.state.tq_client),
     )
+    app.state.followup_alerts = FollowupAlertService(
+        app.state.config_repository,
+        lambda repo, jobs, cursors: signals._scan_cached_alert_jobs(repo, jobs, replay_since=cursors),
+        app.state.tq_client.contract_status,
+    )
     app.state.market_sync_stop = asyncio.Event()
+    app.state.followup_alert_task = asyncio.create_task(
+        app.state.followup_alerts.run(app.state.market_sync_stop), name="followup-alerts",
+    )
+
+    async def publish_rollovers(event: MarketSyncEvent) -> None:
+        await app.state.alert_stream.publish_rollovers(event)
+        await app.state.followup_alerts.publish_rollovers(event)
+
     app.state.market_sync_task = asyncio.create_task(
         run_market_sync_loop(
             app.state.tq_client,
             app.state.config_repository,
             app.state.market_sync_stop,
-            on_rollover=app.state.alert_stream.publish_rollovers,
+            on_rollover=publish_rollovers,
         ),
         name="market-data-sync",
     )
@@ -65,6 +79,8 @@ async def lifespan(app: FastAPI):
     finally:
         app.state.market_sync_stop.set()
         await app.state.market_sync_task
+        app.state.followup_alerts.wake()
+        await app.state.followup_alert_task
         await app.state.alert_stream.close()
         app.state.tq_client.close()
 
@@ -80,6 +96,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(contracts.router)
 app.include_router(signals.router)
+app.include_router(followup_alerts.router)
 app.include_router(settings_api.router)
 
 
