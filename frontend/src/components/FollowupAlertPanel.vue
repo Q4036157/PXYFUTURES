@@ -238,7 +238,7 @@ defineExpose({ open })
         <div class="followup-state-cell"><button type="button" class="followup-source-dot" :class="{ changed: rule.source_changed === true, normal: rule.source_changed === false }" :title="sourceHint(rule)" :aria-label="sourceHint(rule)" :disabled="pendingAction" @click="openReview(rule)"><span /></button></div>
         <span class="followup-target followup-rule-text" :title="`${targetText(rule)}；${rule.status}`">{{ targetText(rule) }}</span>
         <div class="followup-delete-cell"><button type="button" class="followup-delete" aria-label="删除二级条件单" :title="`删除 ${targetText(rule)}`" :disabled="pendingAction" @click="remove(rule)"><el-icon><Close /></el-icon></button></div>
-        <time class="followup-time" :datetime="rule.last_triggered_at || undefined" :title="`${triggerTime(rule.last_triggered_at)}；${rule.status}；最近一次进入目标条件的首根K线收盘时间（北京时间）`">{{ triggerTime(rule.last_triggered_at) || (rule.trigger_count ? '已满足，起点待确认' : '') }}</time>
+        <time class="followup-time" :datetime="rule.last_triggered_at || undefined" :title="`${triggerTime(rule.last_triggered_at)}；${rule.status}；最近一次进入目标条件的首根K线收盘时间（北京时间）`">{{ triggerTime(rule.last_triggered_at) }}</time>
       </div>
       <p v-if="!rules.length" class="followup-empty">暂无条件单</p>
     </div>

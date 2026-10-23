@@ -591,6 +591,19 @@ async function main() {
     assert.deepEqual(errors, [])
     results.push('八种桌面和手机宽度二级面板无左右滚动、桌面时间完整、单行分栏，合约代码与按钮可见、无页面异常')
     const savedRules = structuredClone(followupRules)
+    followupRules[0].last_triggered_at = null
+    followupRules[0].trigger_count = 1
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    assert.equal((await page.locator('.followup-time').first().textContent()).trim(), '', '无可靠触发时间时保持空白，不能显示状态说明代替时间')
+    assert.equal(await page.getByText('已满足，起点待确认', { exact: true }).count(), 0)
+    followupRules[0].last_triggered_at = '2026-10-22T22:40:00+08:00'
+    await page.waitForFunction(() => document.querySelector('.followup-time')?.textContent === '2026-10-22 22:40', null, { timeout: 6000 })
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    assert.equal((await page.locator('.followup-time').first().textContent()).trim(), '2026-10-22 22:40')
+    followupRules = structuredClone(savedRules)
+    results.push('触发时间栏只展示有效时间，旧记录缺失时间时留空，时间恢复后正确显示且刷新保留')
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 720 })
       const heights = []
