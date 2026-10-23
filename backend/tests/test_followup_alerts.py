@@ -13,7 +13,7 @@ from app.config import settings
 from app.services.followup_alerts import FollowupAlertService, SourceConflict
 from app.services.followup_sources import FollowupSourceMonitor
 from app.services.market_sync import build_market_sync_jobs
-from app.services.repository import ConfigRepository, PeriodConfig
+from app.services.repository import ConfigRepository, DuplicateFollowupAlert, PeriodConfig
 
 
 @pytest.fixture
@@ -113,7 +113,7 @@ def test_fixed_state_change_restore_and_count_progress_do_not_gate_target(setup_
 def test_replace_only_one_row_preserves_target_history_and_survives_restart(setup_source):
     repo, _, snapshots, _, service, signal, create, fixed, source_calls = setup_source
     snapshots[:] = [fixed(0), signal(0, "反弹"), signal(1)]
-    first, second = create(), create()
+    first, second = create(), create(duration=600)
     assert len(source_calls[-1]) == 1
     repo.claim_followup_notifications("owner")
     snapshots[:] = [fixed(2, "下跌", "死叉", "空"), signal(2)]
@@ -311,6 +311,101 @@ def test_choices_are_or_within_category_and_and_across_categories(
     assert service.matches({"conditions": conditions, "states": states}, signal(0, label, cross)) is expected
 
 
+def test_duplicate_ignores_option_order_metadata_and_preserves_history(setup_rule):
+    repo, contract, snapshots, calls, service, signal, create = setup_rule
+    snapshots[:] = [signal(0)]
+    create(conditions=["空空金叉", "空空死叉"], states=["反弹", "下跌"])
+    repo.claim_followup_notifications("owner")
+    before = repo.list_followup_alerts("owner")
+    scan_count = len(calls)
+    changed_metadata = {**before[0]["source"], "period_label": "两小时", "confirmed_bar_time": "new-time"}
+    with pytest.raises(DuplicateFollowupAlert, match="完全相同"):
+        service.create_rule(
+            "owner", contract.id, changed_metadata, 1800,
+            ["空空死叉", "空空金叉", "空空死叉"], ["下跌", "反弹", "下跌"],
+        )
+    assert repo.list_followup_alerts("owner") == before
+    assert len(calls) == scan_count
+    assert repo.claim_followup_notifications("owner") == []
+    restarted = ConfigRepository()
+    with pytest.raises(DuplicateFollowupAlert):
+        restarted.create_followup_alert(
+            "owner", contract.id, contract.symbol, changed_metadata, 1800,
+            ["空空死叉", "空空金叉"], ["下跌", "反弹"],
+        )
+
+
+@pytest.mark.parametrize("difference", [
+    "symbol", "source_period", "source_condition", "source_state",
+    "target_period", "conditions", "states", "owner",
+])
+def test_any_different_condition_or_owner_is_allowed(setup_rule, difference):
+    repo, contract, _, _, service, _, create = setup_rule
+    create()
+    owner = "other" if difference == "owner" else "owner"
+    if difference in {"symbol", "owner"}:
+        contract = repo.create_contract(owner, "DCE.P2705" if difference == "symbol" else contract.symbol, "棕榈油")
+    source = {"duration_seconds": 7200, "condition": "多空金叉", "state": "反弹"}
+    if difference == "source_period":
+        source["duration_seconds"] = 3600
+    elif difference == "source_condition":
+        source["condition"] = "空空死叉"
+    elif difference == "source_state":
+        source["state"] = "下跌"
+    service.create_rule(
+        owner, contract.id, source, 600 if difference == "target_period" else 1800,
+        ["空空死叉"] if difference == "conditions" else [],
+        ["反弹"] if difference == "states" else ["下跌"],
+    )
+    assert len(repo.list_followup_alerts()) == 2
+
+
+def test_concurrent_repository_creates_only_one_rule(setup_rule):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    repo, contract, _, _, _, _, _ = setup_rule
+    barrier = Barrier(4)
+    def save(_index):
+        barrier.wait(timeout=5)
+        try:
+            return repo.create_followup_alert(
+                "owner", contract.id, contract.symbol,
+                {"duration_seconds": 7200, "condition": "多空金叉", "state": "反弹"},
+                1800, [], ["下跌"],
+            )
+        except DuplicateFollowupAlert:
+            return None
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(save, range(4)))
+    assert sum(rule_id is not None for rule_id in results) == 1
+    assert len(repo.list_followup_alerts()) == 1
+
+
+def test_source_replacement_rejects_duplicate_without_changing_either_rule(setup_source):
+    repo, contract, snapshots, _, service, signal, create, fixed, _ = setup_source
+    snapshots[:] = [fixed(0, "下跌", "死叉", "空"), signal(0)]
+    first = create()
+    second = service.create_rule(
+        "owner", contract.id, {"duration_seconds": 7200, "condition": "空空死叉", "state": "下跌"},
+        1800, [], ["下跌"],
+    )
+    repo.claim_followup_notifications("owner")
+    before = repo.list_followup_alerts()
+    viewed = service.list_rules("owner")[0]
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(followup_alerts=service)))
+    body = api.SourceReplacement(previous=viewed["source"], observed=viewed["source_current"])
+    with pytest.raises(HTTPException) as duplicate:
+        asyncio.run(api.replace_source(first, body, request, "owner"))
+    assert duplicate.value.status_code == 409
+    assert "完全相同" in duplicate.value.detail
+    assert repo.list_followup_alerts() == before
+    assert repo.claim_followup_notifications("owner") == []
+    repo.delete_followup_alert("owner", second)
+    asyncio.run(api.replace_source(first, body, request, "owner"))
+    assert service.list_rules("owner")[0]["source_changed"] is False
+
+
 def test_same_contract_multiple_rules_and_tenant_safe_delete(setup_rule):
     repo, contract, snapshots, _, service, signal, create = setup_rule
     snapshots[:] = [signal(0), signal(0, duration=900)]
@@ -364,7 +459,7 @@ def test_batched_delayed_bars_preserve_all_state_entries_and_new_rule_uses_lates
     snapshots.append(signal(0, "反弹"))
     create()
     snapshots[:] = [signal(3), signal(1), signal(2, "反弹")]
-    create()
+    create(conditions=["空空死叉"])
     assert [r["trigger_count"] for r in service.list_rules("owner")] == [2, 1]
     service.evaluate()
     assert [r["trigger_count"] for r in service.list_rules("owner")] == [2, 1]
@@ -557,6 +652,11 @@ def test_api_validation_and_account_boundaries(setup_rule):
         assert forbidden.value.status_code == 404
         result = await api.create_rule(body, request, user_id="owner")
         assert len(result["rules"]) == 1
+        with pytest.raises(HTTPException) as duplicate:
+            await api.create_rule(body, request, user_id="owner")
+        assert duplicate.value.status_code == 409
+        assert "完全相同" in duplicate.value.detail
+        assert len(service.list_rules("owner")) == 1
         assert (await api.list_rules(request, user_id="other"))["rules"] == []
         with pytest.raises(HTTPException) as hidden:
             await api.delete_rule(result["created_id"], request, user_id="other")

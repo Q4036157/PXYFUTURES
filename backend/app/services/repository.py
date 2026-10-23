@@ -57,6 +57,18 @@ class KlineSyncState:
     last_synced_at_ns: int
 
 
+class DuplicateFollowupAlert(ValueError):
+    """同账号已经保存了完全相同的固定条件与变换条件。"""
+
+
+def _followup_criteria(source: dict, conditions: list[str], states: list[str]) -> tuple:
+    """名称、时间及选项顺序不改变条件含义。"""
+    return (
+        source.get("duration_seconds"), source.get("condition") or None, source.get("state"),
+        tuple(sorted(set(conditions))), tuple(sorted(set(states))),
+    )
+
+
 class ConfigRepository:
     def __init__(self) -> None:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -385,12 +397,31 @@ class ConfigRepository:
                 (note, contract_id, duration_seconds, contract_id, user_id),
             ).rowcount > 0
 
+    @staticmethod
+    def _check_followup_duplicate(
+        conn: sqlite3.Connection, user_id: str, symbol: str, source: dict,
+        duration_seconds: int, conditions: list[str], states: list[str], excluded_id: int = 0,
+    ) -> None:
+        candidates = conn.execute(
+            """SELECT source_json,conditions_json,states_json FROM followup_alerts
+               WHERE user_id = ? AND symbol = ? AND duration_seconds = ? AND id != ?""",
+            (user_id, symbol, duration_seconds, excluded_id),
+        ).fetchall()
+        criteria = _followup_criteria(source, conditions, states)
+        for row in candidates:
+            if criteria == _followup_criteria(
+                json.loads(row["source_json"]), json.loads(row["conditions_json"]), json.loads(row["states_json"]),
+            ):
+                raise DuplicateFollowupAlert("已有完全相同的条件单，请修改固定条件或变换条件后再保存")
+
     def create_followup_alert(
         self, user_id: str, contract_id: int, symbol: str, source: dict[str, object],
         duration_seconds: int, conditions: list[str], states: list[str],
     ) -> int:
         """条件单独立保存，同一品种允许创建多条不同规则。"""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._check_followup_duplicate(conn, user_id, symbol, source, duration_seconds, conditions, states)
             cursor = conn.execute(
                 """INSERT INTO followup_alerts(
                     user_id,contract_id,symbol,source_json,duration_seconds,
@@ -479,6 +510,21 @@ class ConfigRepository:
     ) -> bool:
         """仅更新所属账号这一行固定条件，目标游标和提醒计数保持原值。"""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM followup_alerts
+                   WHERE id = ? AND user_id = ? AND symbol = ? AND source_json = ?
+                   AND EXISTS (SELECT 1 FROM contracts
+                               WHERE contracts.id = followup_alerts.contract_id
+                               AND contracts.user_id = ? AND contracts.symbol = ?)""",
+                (rule_id, user_id, symbol, json.dumps(previous, ensure_ascii=False), user_id, symbol),
+            ).fetchone()
+            if row is None:
+                return False
+            self._check_followup_duplicate(
+                conn, user_id, symbol, current, row["duration_seconds"],
+                json.loads(row["conditions_json"]), json.loads(row["states_json"]), excluded_id=rule_id,
+            )
             return conn.execute(
                 """UPDATE followup_alerts SET source_json = ?
                    WHERE id = ? AND user_id = ? AND symbol = ? AND source_json = ?

@@ -22,6 +22,7 @@ async function main() {
   let followupRules = [], followupNotifications = [], followupRequests = [], nextFollowupId = 1
   let followupAlreadyMatches = false, failFollowupSave = false, failFollowupDelete = false
   let failSourceReplace = false
+  let rejectDuplicateFollowup = false
   let holdSuggestions = false, releaseSuggestions = null, failSuggestions = false
   page.on('pageerror', error => errors.push(error.message))
   await page.addInitScript(() => {
@@ -59,6 +60,7 @@ async function main() {
           followupNotifications = followupNotifications.filter(rule => rule.id !== Number(last))
           return route.fulfill({ status: 204 })
         } else if (method === 'POST') {
+          if (rejectDuplicateFollowup) return route.fulfill({ status: 409, json: { detail: '已有完全相同的条件单，请修改固定条件或变换条件后再保存' } })
           if (failFollowupSave) return route.fulfill({ status: 500, json: { detail: '模拟二级条件保存失败' } })
           followupRequests.push(body)
           const rule = {
@@ -388,6 +390,22 @@ async function main() {
     assert.equal(await page.locator('.followup-popup').count(), 0)
     assert.equal(await page.evaluate(() => window.__followupTones), 0)
     results.push('一级整行可点击、三栏设置、保存失败保留选择、已满足立即提醒、独立提示音、红框内右上角提示、刷新不重响')
+    await page.locator('.alert-result-link').first().click()
+    await secondaryDialog.waitFor()
+    await secondaryDialog.getByRole('button', { name: '5分钟', exact: true }).click()
+    await secondaryDialog.getByRole('button', { name: '空空死叉', exact: true }).click()
+    await secondaryDialog.getByRole('button', { name: '下跌', exact: true }).click()
+    rejectDuplicateFollowup = true
+    await secondaryDialog.getByRole('button', { name: '确定', exact: true }).click()
+    await page.getByText('已有完全相同的条件单，请修改固定条件或变换条件后再保存', { exact: true }).waitFor()
+    assert.equal(await secondaryDialog.isVisible(), true)
+    assert.equal(await secondaryDialog.getByRole('button', { name: '空空死叉', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await page.locator('.followup-rule').count(), 1)
+    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00')
+    assert.equal(await page.evaluate(() => window.__followupTones), 0)
+    await secondaryDialog.getByRole('button', { name: '取消', exact: true }).click()
+    rejectDuplicateFollowup = false
+    results.push('重复条件返回明确提示，保留设置及原条件单、触发时间，不新增行也不重复响铃')
     followupAlreadyMatches = false
     await page.locator('.alert-result-link').first().click()
     await secondaryDialog.waitFor()

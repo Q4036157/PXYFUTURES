@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.api.signals import _SUPPORTED_ALERT_DURATIONS
 from app.services.auth import current_user_id
 from app.services.followup_alerts import CONDITIONS, STATES, FollowupAlertService, SourceConflict
+from app.services.repository import DuplicateFollowupAlert
 
 router = APIRouter(prefix="/api/followup-alerts", tags=["二级预警"])
 
@@ -72,6 +73,8 @@ async def create_rule(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DuplicateFollowupAlert as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"created_id": rule_id, "rules": await asyncio.to_thread(service.list_rules, user_id)}
@@ -95,7 +98,7 @@ async def replace_source(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except SourceConflict as exc:
+    except (SourceConflict, DuplicateFollowupAlert) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"rules": await asyncio.to_thread(service.list_rules, user_id)}
 
