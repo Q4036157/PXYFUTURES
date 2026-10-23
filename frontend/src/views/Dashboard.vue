@@ -661,10 +661,10 @@ function openContractEdit(contract: ContractConfig): void {
   contractEditVisible.value = true
 }
 
-function handleContractEditCodeInput(): void {
-  const result = recognizeContract(contractEditForm.value.code)
-  contractEditForm.value.code = contractEditForm.value.code.replace(/\s+/g, '').toUpperCase()
-  if (result.exchange) contractEditForm.value.exchange = result.exchange
+function handleContractEditCodeInput(value: string): void {
+  const result = recognizeContract(value)
+  contractEditForm.value.code = value.replace(/\s+/g, '').toUpperCase()
+  contractEditForm.value.exchange = result.exchange ?? ''
 }
 
 function selectContractEditSuggestion(item: ContractSuggestion): void {
@@ -1005,11 +1005,12 @@ async function updateContract(): Promise<void> {
   }
 }
 
-function handleContractCodeInput(): void {
-  const result = recognizeContract(form.value.code)
+function handleContractCodeInput(value: string): void {
+  // 自动补全先发出输入事件，再更新绑定值，识别必须使用本次事件值。
+  const result = recognizeContract(value)
   // 保留用户输入的 PVC/PV 显示名，只规范大小写；提交时由后端转为数据源标准代码 V。
-  form.value.code = form.value.code.replace(/\s+/g, '').toUpperCase()
-  if (result.exchange) form.value.exchange = result.exchange
+  form.value.code = value.replace(/\s+/g, '').toUpperCase()
+  form.value.exchange = result.exchange ?? ''
 }
 
 function openPeriod(period?: PeriodConfig): void {
@@ -1321,7 +1322,7 @@ onBeforeUnmount(() => {
     </Transition>
 
     <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close>
-      <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item><el-form-item label="所属分组"><el-select v-model="form.group_id" class="full-width"><el-option v-for="group in contractGroups" :key="group.id" :label="group.name" :value="group.id" /></el-select></el-form-item></el-form>
+      <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="上期能源 INE" value="INE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item><el-form-item label="所属分组"><el-select v-model="form.group_id" class="full-width"><el-option v-for="group in contractGroups" :key="group.id" :label="group.name" :value="group.id" /></el-select></el-form-item></el-form>
       <template #footer><el-button :disabled="adding" @click="addVisible = false">取消</el-button><el-button type="primary" :loading="adding" @click="createContract">验证并添加</el-button></template>
     </el-dialog>
 

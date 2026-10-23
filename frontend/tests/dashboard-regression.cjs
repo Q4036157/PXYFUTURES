@@ -77,7 +77,9 @@ async function main() {
         data = moved
       } else if (last === 'signals') data = { contract_id: Number(parts.at(-2)), symbol: 'CZCE.SR701', market_status: 'active', signals: periods.map(period => signal(0, fixture[0].contracts[0], period)), warnings: [] }
       else if (last === 'scan') data = { signals: scanSignals, requested: 6, failed: 0 }
-      else if (last === 'suggestions') data = []
+      else if (last === 'suggestions') data = url.searchParams.get('query')?.toUpperCase() === 'SH'
+        ? [{ value: 'SH2701', exchange: 'CZCE', display: 'SH2701' }]
+        : []
       else if (last === 'contracts' && method === 'POST') {
         data = { ...body, id: 4, symbol: `${body.exchange}.${body.code}`, periods, sort_order: 3 }
         state[0].contracts.push(data)
@@ -131,14 +133,36 @@ async function main() {
     results.push('保存期间禁用并发排序，保存失败恢复服务器顺序')
     await page.getByRole('button', { name: '向该分组添加合约', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: '添加合约', exact: true })
-    await dialog.getByPlaceholder('例如 pv、fg 或 RB2609').fill('CF701')
+    const codeInput = dialog.getByPlaceholder('例如 pv、fg 或 RB2609')
+    const exchangeSelect = dialog.locator('.el-select').first()
+    for (const [code, exchange] of [
+      ['SH2701', '郑商所 CZCE'], ['p2701', '大商所 DCE'], ['rb2701', '上期所 SHFE'],
+      ['sc2701', '上期能源 INE'], ['if2612', '中金所 CFFEX'], ['lc2701', '广期所 GFEX'],
+      ['pv2701', '大商所 DCE'],
+    ]) {
+      await codeInput.fill(code)
+      await page.waitForTimeout(50)
+      assert.equal((await exchangeSelect.innerText()).trim(), exchange, `输入${code}后交易所应同步更新`)
+    }
+    for (const code of ['UNKNOWN', '']) {
+      await codeInput.fill(code)
+      await page.waitForTimeout(50)
+      assert.equal((await exchangeSelect.innerText()).trim(), '输入代码后自动选择', '未知或清空代码不能保留上一个交易所')
+    }
+    await codeInput.pressSequentially('sh')
+    await page.getByRole('option', { name: 'SH2701 CZCE' }).click()
+    assert.equal(await codeInput.inputValue(), 'SH2701')
+    assert.equal((await exchangeSelect.innerText()).trim(), '郑商所 CZCE')
+    await page.screenshot({ path: path.join(screenshotDir, 'pxyfutures-contract-exchange.png') })
+    await codeInput.fill('CF701')
     await dialog.getByRole('button', { name: '验证并添加', exact: true }).click()
     await page.waitForFunction(() => document.querySelectorAll('.contract-row').length === 4)
     assert.equal((await codes()).at(-1), 'CF701')
     await page.reload()
     await page.waitForSelector('.signal-table tbody tr')
     assert.equal((await codes()).at(-1), 'CF701')
-    results.push('新合约追加在自定义顺序末尾并刷新保留')
+    assert.equal(state[0].contracts.at(-1).exchange, 'CZCE')
+    results.push('输入或粘贴代码自动选择六个交易所、候选选择、清空重置、提交交易所正确；新合约顺序刷新保留')
     const first = signal()
     const nextBarTime = new Date(Date.parse(first.cross_time) + periods[0].duration_seconds * 1000).toISOString()
     const next = { ...first, bar_time: nextBarTime, confirmed_bar_time: nextBarTime, confirmed_at: new Date().toISOString(), state_bar_count: 2 }
