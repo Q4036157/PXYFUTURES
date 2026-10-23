@@ -64,6 +64,9 @@ def to_tq_symbol(symbol: str) -> str:
     if not separator or not exchange or not code:
         return symbol
     normalized_exchange = exchange.upper()
+    match = _FULL_CONTRACT.fullmatch(code.upper())
+    if normalized_exchange == "CZCE" and match and len(match[2]) == 4:
+        code = f"{match[1]}{match[2][1:]}"
     return f"{normalized_exchange}.{to_tq_product(normalized_exchange, code)}"
 
 

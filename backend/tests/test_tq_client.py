@@ -1,6 +1,7 @@
 import asyncio
 from time import monotonic
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pandas as pd
 import pytest
@@ -40,9 +41,22 @@ class FakeKlineApi:
 
 
 class FakeQuoteApi:
+    instances: ClassVar[list] = []
+
     def __init__(self, ins_class: str = "FUTURE", expired: bool = False) -> None:
         self.quote = SimpleNamespace(ins_class=ins_class, expired=expired)
         self.symbol: str | None = None
+        self.loop = asyncio.new_event_loop()
+        self.instances.append(self)
+
+    def create_task(self, coroutine):
+        return self.loop.create_task(coroutine)
+
+    def wait_update(self, **_kwargs):
+        self.loop.run_until_complete(asyncio.sleep(0))
+
+    def close(self):
+        FakeSymbolApi.close(self)
 
     def get_quote(self, symbol: str) -> SimpleNamespace:
         self.symbol = symbol
@@ -105,6 +119,14 @@ def symbol_api():
     yield create
     for api in instances:
         api.close()
+
+
+@pytest.fixture(autouse=True)
+def close_quote_apis():
+    yield
+    for api in FakeQuoteApi.instances:
+        api.close()
+    FakeQuoteApi.instances.clear()
 
 
 class FakeKlineCache:
@@ -223,6 +245,57 @@ def test_active_future_validation_preserves_czce_product_case() -> None:
 
     assert client.require_active_future("CZCE.OI609") == "CZCE.OI609"
     assert api.symbol == "CZCE.OI609"
+
+
+@pytest.mark.parametrize("symbol", ["CZCE.SH2701", "czce.sh2701", "CZCE.SH701"])
+def test_validation_maps_alias_and_checks_actual_delivery_year(symbol):
+    api = FakeQuoteApi()
+    api.quote.delivery_year, api.quote.delivery_month = 2027, 1
+    client = TqClient()
+    client._api = api
+    assert client.require_active_future(symbol) == "CZCE.SH701"
+    assert api.symbol == "CZCE.SH701"
+    assert client.contract_status("CZCE.SH701") == "active"
+
+
+@pytest.mark.parametrize(("year", "month", "error"), [
+    (2037, 1, ContractUnavailable), (2027, 2, ContractUnavailable),
+    (0, 0, MarketDataUnavailable),
+])
+def test_explicit_delivery_alias_never_silently_maps_to_another_year(year, month, error):
+    api = FakeQuoteApi()
+    api.quote.delivery_year, api.quote.delivery_month = year, month
+    client = TqClient()
+    client._api = api
+    with pytest.raises(error):
+        client.require_active_future("CZCE.SH2701")
+    assert api.symbol == "CZCE.SH701"
+
+
+def test_validation_times_out_and_cancels_quote_query(monkeypatch):
+    api = FakeQuoteApi()
+
+    async def never_ready(_symbol):
+        await asyncio.Future()
+
+    api.get_quote = never_ready
+    client = TqClient()
+    client._api = api
+    monkeypatch.setattr(tq_client, "_CONTRACT_QUERY_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(MarketDataUnavailable):
+        client.require_active_future("CZCE.SH701")
+    api.loop.run_until_complete(asyncio.sleep(0))
+    assert not asyncio.all_tasks(api.loop)
+
+
+def test_validation_lock_wait_is_bounded_and_does_not_query(monkeypatch):
+    api = FakeQuoteApi()
+    client = TqClient()
+    client._api = api
+    monkeypatch.setattr(tq_client, "_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS", 0.01)
+    with client._lock, pytest.raises(MarketDataUnavailable, match="同步繁忙"):
+        client.require_active_future("CZCE.SH2701")
+    assert api.symbol is None
 
 
 @pytest.mark.parametrize("ins_class,expired", [("", False), ("FUTURE", True), ("OPTION", False)])

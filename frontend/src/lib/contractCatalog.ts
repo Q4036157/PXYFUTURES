@@ -10,7 +10,7 @@ export const PRODUCT_EXCHANGES: Record<string, string> = {
 const exchangeNames: Record<string, string> = { CZCE: '郑商所', DCE: '大商所', SHFE: '上期所', INE: '上期能源', CFFEX: '中金所', GFEX: '广期所' }
 const productAliases: Record<string, string> = { PVC: 'V', PV: 'V' }
 
-export interface ContractRecognition { code: string; exchange: string | null; exchangeName: string | null; complete: boolean }
+export interface ContractRecognition { code: string; dataCode: string; exchange: string | null; exchangeName: string | null; complete: boolean }
 
 export function recognizeContract(input: string): ContractRecognition {
   const code = input.replace(/\s+/g, '').toUpperCase()
@@ -23,5 +23,7 @@ export function recognizeContract(input: string): ContractRecognition {
   const complete = Boolean(product && /^\d{3,4}$/.test(suffix)
     && Number(suffix.slice(-2)) >= 1 && Number(suffix.slice(-2)) <= 12
     && (suffix.length === 4 || exchange === 'CZCE'))
-  return { code: standardCode, exchange, exchangeName: exchange ? exchangeNames[exchange] ?? null : null, complete }
+  const dataCode = complete && exchange === 'CZCE' && suffix.length === 4
+    ? `${product}${suffix.slice(1)}` : standardCode
+  return { code: standardCode, dataCode, exchange, exchangeName: exchange ? exchangeNames[exchange] ?? null : null, complete }
 }

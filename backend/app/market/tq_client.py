@@ -644,11 +644,21 @@ class TqClient:
 
     def require_active_future(self, symbol: str) -> str:
         """确认天勤当前存在指定的未下市期货合约，并返回天勤代码。"""
-        with self._lock:
+        if not self._lock.acquire(timeout=_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS):
+            raise MarketDataUnavailable("行情同步繁忙，请稍后重试验证")
+        try:
             api = self._get_api()
             tq_symbol = to_tq_symbol(symbol)
             try:
-                quote = api.get_quote(tq_symbol)
+                async def query_quote():
+                    quote = api.get_quote(tq_symbol)
+                    if isawaitable(quote):
+                        await quote
+                    return quote
+
+                quote = self._wait_contract_query(api, query_quote)
+            except MarketDataUnavailable:
+                raise
             except Exception as exc:
                 logger.info(
                     "天勤合约验证失败: symbol=%s tq_symbol=%s", symbol, tq_symbol, exc_info=True
@@ -663,8 +673,34 @@ class TqClient:
                 if bool(getattr(quote, "expired", False)):
                     self._remember_contract_status(symbol, "expired")
                 raise ContractUnavailable(f"{symbol} 当前不存在、已下市，或不是可添加的期货合约")
+            match = re.fullmatch(r"CZCE\.[A-Z]+(\d{2})(\d{2})", symbol.upper())
+            if match:
+                year, month = getattr(quote, "delivery_year", 0), getattr(quote, "delivery_month", 0)
+                if not year or not month:
+                    raise MarketDataUnavailable(f"暂时无法确认 {symbol} 的交割年月，请稍后重试")
+                if year != 2000 + int(match[1]) or month != int(match[2]):
+                    raise ContractUnavailable(f"{symbol} 的交割年月与当前可用合约不符，请核对年份和月份")
             self._remember_contract_status(symbol, "active")
+            self._remember_contract_status(tq_symbol, "active")
             return tq_symbol
+        finally:
+            self._lock.release()
+
+    @staticmethod
+    def _wait_contract_query(api: object, query: Callable) -> object:
+        """在SDK协程内发起查询，统一限制等待时间，避免同步接口等待30秒。"""
+        task = api.create_task(query())
+        try:
+            deadline = monotonic() + _CONTRACT_QUERY_TIMEOUT_SECONDS
+            while not task.done():
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise MarketDataUnavailable("合约查询超时，请稍后重试")
+                api.wait_update(deadline=time() + min(0.05, remaining))
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
 
     def list_active_futures(self, exchange: str, product: str) -> list[str]:
         """返回指定品种当前未下市的期货合约，结果短时缓存以减少合约服务请求。"""
@@ -686,7 +722,6 @@ class TqClient:
         if not self._lock.acquire(timeout=_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS):
             self._notices.warning("contract-suggestions", "可用合约查询暂不可用：行情锁等待超时")
             raise MarketDataUnavailable("行情同步繁忙，可稍后重试候选查询，或输入完整合约后验证")
-        task = None
         try:
             cached_symbols = read_cache()
             if cached_symbols is not None:
@@ -705,14 +740,7 @@ class TqClient:
                 return list(await result if isawaitable(result) else result)
 
             # 在 SDK 协程中查询，避免同步接口内置的 30 秒等待阻塞行情刷新。
-            task = api.create_task(query_symbols())
-            deadline = monotonic() + _CONTRACT_QUERY_TIMEOUT_SECONDS
-            while not task.done():
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise MarketDataUnavailable("可用合约查询超时，可稍后重试，或输入完整合约后验证")
-                api.wait_update(deadline=time() + min(0.05, remaining))
-            symbols = task.result()
+            symbols = self._wait_contract_query(api, query_symbols)
             prefix = f"{normalized_exchange}."
             active = tuple(
                 sorted({symbol for symbol in symbols if symbol.upper().startswith(prefix)})
@@ -733,8 +761,6 @@ class TqClient:
                 raise
             raise MarketDataUnavailable("暂时无法读取天勤可用合约，请稍后重试") from exc
         finally:
-            if task is not None and not task.done():
-                task.cancel()
             self._lock.release()
 
     def close(self) -> None:

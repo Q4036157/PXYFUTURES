@@ -17,6 +17,7 @@ async function main() {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } })
   const page = await context.newPage()
   const state = structuredClone(fixture), errors = [], orderRequests = [], results = []
+  const contractRequests = []
   let sockets = [], scanSignals = [], failOrder = false, releaseOrder = null, holdOrder = false
   let followupRules = [], followupNotifications = [], followupRequests = [], nextFollowupId = 1
   let followupAlreadyMatches = false, failFollowupSave = false, failFollowupDelete = false
@@ -85,7 +86,12 @@ async function main() {
         data = query?.startsWith('SH') ? [{ value: 'SH2701', exchange: 'CZCE', display: 'SH2701' }] : []
       }
       else if (last === 'contracts' && method === 'POST') {
-        data = { ...body, id: 4, symbol: `${body.exchange}.${body.code}`, periods, sort_order: 3 }
+        contractRequests.push(body)
+        const code = body.exchange === 'CZCE' ? body.code.replace(/^([A-Z]+)\d(\d{3})$/, '$1$2') : body.code
+        if (state[0].contracts.some(contract => contract.symbol === `${body.exchange}.${code}`)) {
+          return route.fulfill({ status: 409, json: { detail: '该合约已添加' } })
+        }
+        data = { ...body, code, id: 4, symbol: `${body.exchange}.${code}`, periods, sort_order: 3 }
         state[0].contracts.push(data)
       } else throw Error(`未预期接口 ${method} ${url.pathname}`)
       return route.fulfill({ json: data })
@@ -193,16 +199,24 @@ async function main() {
     await page.getByRole('option', { name: 'SH2701 CZCE' }).click()
     assert.equal(await codeInput.inputValue(), 'SH2701')
     assert.equal((await exchangeSelect.innerText()).trim(), '郑商所 CZCE')
+    assert.ok((await dialog.locator('.recognition').first().innerText()).includes('数据代码 SH701'))
     await page.screenshot({ path: path.join(screenshotDir, 'pxyfutures-contract-exchange.png') })
-    await codeInput.fill('CF701')
+    await codeInput.fill('CF2701')
     await dialog.getByRole('button', { name: '验证并添加', exact: true }).click()
     await page.waitForFunction(() => document.querySelectorAll('.contract-row').length === 4)
     assert.equal((await codes()).at(-1), 'CF701')
+    assert.equal(contractRequests.at(-1).code, 'CF2701', '完整年份必须保留到后端验证')
     await page.reload()
     await page.waitForSelector('.signal-table tbody tr')
     assert.equal((await codes()).at(-1), 'CF701')
     assert.equal(state[0].contracts.at(-1).exchange, 'CZCE')
-    results.push('输入或粘贴代码自动选择六个交易所、候选选择、清空重置、提交交易所正确；新合约顺序刷新保留')
+    await page.getByRole('button', { name: '向该分组添加合约', exact: true }).click()
+    await codeInput.fill('CF701')
+    await dialog.getByRole('button', { name: '验证并添加', exact: true }).click()
+    await page.getByText('该合约已添加', { exact: true }).waitFor()
+    assert.equal(await page.locator('.contract-row').count(), 4)
+    await dialog.getByRole('button', { name: '取消', exact: true }).click()
+    results.push('自动选择六个交易所、候选选择、四位年月提交后保存标准合约、三位别名拒绝重复、刷新保留顺序')
     const first = signal()
     const nextBarTime = new Date(Date.parse(first.cross_time) + periods[0].duration_seconds * 1000).toISOString()
     const next = { ...first, bar_time: nextBarTime, confirmed_bar_time: nextBarTime, confirmed_at: new Date().toISOString(), state_bar_count: 2 }

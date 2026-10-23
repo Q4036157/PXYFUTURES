@@ -69,3 +69,13 @@ def test_tq_symbol_uses_exchange_specific_product_case() -> None:
     assert to_tq_symbol("DCE.V2609") == "DCE.v2609"
     assert to_tq_symbol("CZCE.FG609") == "CZCE.FG609"
     assert to_tq_symbol("CFFEX.IF2609") == "CFFEX.IF2609"
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("CZCE.SH2701", "CZCE.SH701"), ("czce.sh2701", "CZCE.SH701"),
+    ("CZCE.SH701", "CZCE.SH701"), ("CZCE.FG2612", "CZCE.FG612"),
+    ("DCE.P2701", "DCE.p2701"), ("SHFE.RB2701", "SHFE.rb2701"),
+    ("CZCE.SH270", "CZCE.SH270"),
+])
+def test_tq_symbol_converts_czce_four_digit_delivery_alias_only(value, expected):
+    assert to_tq_symbol(value) == expected

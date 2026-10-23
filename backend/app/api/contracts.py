@@ -6,7 +6,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
-from app.market.contract_catalog import normalize_contract_code
+from app.market.contract_catalog import normalize_contract_code, to_tq_symbol
 from app.market.tq_client import ContractUnavailable, MarketDataUnavailable, TqClient
 from app.services.auth import current_user_id
 from app.services.repository import ConfigRepository, ContractConfig, ContractGroup, PeriodConfig
@@ -137,7 +137,7 @@ async def list_contract_suggestions(
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    prefix = normalized.code.upper()
+    prefix = to_tq_symbol(f"{normalized.exchange}.{normalized.code}").partition(".")[2].upper()
     suggestions: list[dict[str, str]] = []
     for symbol in symbols:
         exchange, _, code = symbol.partition(".")
@@ -163,7 +163,7 @@ async def create_contract(
     symbol = f"{exchange}.{normalized.code}"
     client: TqClient = request.app.state.tq_client
     try:
-        await asyncio.to_thread(client.require_active_future, symbol)
+        symbol = (await asyncio.to_thread(client.require_active_future, symbol)).upper()
     except ContractUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except MarketDataUnavailable as exc:
@@ -238,11 +238,14 @@ async def update_contract(
 
     client: TqClient = request.app.state.tq_client
     try:
-        await asyncio.to_thread(client.require_active_future, symbol)
+        symbol = (await asyncio.to_thread(client.require_active_future, symbol)).upper()
     except ContractUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if symbol == current.symbol:
+        return _serialize(current)
 
     try:
         updated = repository.update_contract(
