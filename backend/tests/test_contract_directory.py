@@ -98,13 +98,14 @@ def test_failed_atomic_write_preserves_memory_and_previous_disk_snapshot(tmp_pat
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_partial_four_digit_prefix_suggests_full_year_without_accepting_partial_input(tmp_path):
+@pytest.mark.parametrize("query", ["sh270", "sh2701", "sh701", "sh"])
+def test_suggestions_show_full_delivery_year_and_preserve_data_symbol(tmp_path, query):
     directory = LocalContractDirectory(tmp_path / "contracts.json")
     directory.replace([contract()])
     client = TqClient(directory)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(tq_client=client)))
-    result = asyncio.run(list_contract_suggestions(request, "sh270", "owner"))
-    assert result == [{"value": "SH701", "exchange": "CZCE", "symbol": "CZCE.SH701"}]
+    result = asyncio.run(list_contract_suggestions(request, query, "owner"))
+    assert result == [{"value": "SH2701", "display": "烧碱SH2701", "exchange": "CZCE", "symbol": "CZCE.SH701"}]
 
 
 def test_background_refresh_is_batched_and_failed_refresh_keeps_snapshot(tmp_path, monkeypatch):

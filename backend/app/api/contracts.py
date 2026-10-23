@@ -144,7 +144,8 @@ async def list_contract_suggestions(
         code = code.upper()
         full_code = client.contract_full_code(symbol) if hasattr(client, "contract_full_code") else code
         if code.startswith(prefix) or full_code.startswith(normalized.code):
-            suggestions.append({"value": code, "exchange": exchange.upper(), "symbol": f"{exchange.upper()}.{code}"})
+            display = client.contract_display_name(symbol) if hasattr(client, "contract_display_name") else full_code
+            suggestions.append({"value": full_code, "display": display, "exchange": exchange.upper(), "symbol": f"{exchange.upper()}.{code}"})
     return suggestions[:20]
 
 

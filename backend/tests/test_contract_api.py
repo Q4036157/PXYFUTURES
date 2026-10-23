@@ -83,7 +83,7 @@ def test_change_to_another_contract_stores_verified_canonical_symbol(setup_contr
 def test_suggestions_match_four_and_three_digit_codes(setup_contracts, query):
     _, request, _ = setup_contracts
     result = asyncio.run(contracts.list_contract_suggestions(request, query, "owner"))
-    assert result == [{"value": "SH701", "exchange": "CZCE", "symbol": "CZCE.SH701"}]
+    assert result == [{"value": "SH701", "display": "SH701", "exchange": "CZCE", "symbol": "CZCE.SH701"}]
 
 
 def test_invalid_partial_code_does_not_contact_market_or_create_record(setup_contracts):

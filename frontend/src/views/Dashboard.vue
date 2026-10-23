@@ -648,7 +648,7 @@ async function fetchContractSuggestions(
       params: { query }, signal: controller.signal, timeout: 3_500,
     })
     if (version !== suggestionVersion || controller.aborted) return
-    callback(data.map((item) => ({ ...item, display: displayContractCode(item.value) })))
+    callback(data.map((item) => ({ ...item, display: item.display || displayContractCode(item.value) })))
     suggestionHint.value = data.length ? '' : '暂无匹配候选；可输入完整合约代码后点击验证。'
   } catch (error: any) {
     if (version !== suggestionVersion || controller.aborted) return
@@ -670,7 +670,7 @@ function cancelContractSuggestions(): void {
 
 function selectContractSuggestion(item: ContractSuggestion): void {
   cancelContractSuggestions()
-  form.value.code = item.display
+  form.value.code = displayContractCode(item.value)
   form.value.exchange = item.exchange
 }
 
@@ -694,7 +694,7 @@ function handleContractEditCodeInput(value: string): void {
 
 function selectContractEditSuggestion(item: ContractSuggestion): void {
   cancelContractSuggestions()
-  contractEditForm.value.code = item.display
+  contractEditForm.value.code = displayContractCode(item.value)
   contractEditForm.value.exchange = item.exchange
 }
 

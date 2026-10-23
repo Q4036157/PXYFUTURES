@@ -796,6 +796,14 @@ class TqClient:
         record = self._contract_directory.get(symbol) if self._contract_directory else None
         return record.full_code if record else symbol.partition(".")[2].upper()
 
+    def contract_display_name(self, symbol: str) -> str:
+        """候选显示品种中文名称与完整交割年月，输入值仍单独使用合约代码。"""
+        record = self._contract_directory.get(symbol) if self._contract_directory else None
+        if record is None:
+            return self.contract_full_code(symbol)
+        product_name = re.sub(r"\d{3,4}[A-Za-z]*$", "", record.name).strip()
+        return f"{product_name}{record.full_code}"
+
     def refresh_contract_directory(self) -> None:
         """由行情后台批量更新目录，前台不发起SDK请求。"""
         directory = self._contract_directory

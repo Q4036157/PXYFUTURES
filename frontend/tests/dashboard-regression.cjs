@@ -83,7 +83,7 @@ async function main() {
         const query = url.searchParams.get('query')?.toUpperCase()
         if (holdSuggestions && query === 'SH2701') await new Promise(resolve => { releaseSuggestions = resolve })
         if (failSuggestions) return route.fulfill({ status: 503, json: { detail: '模拟候选查询暂不可用，可输入完整合约后验证' } })
-        data = query?.startsWith('SH') ? [{ value: 'SH2701', exchange: 'CZCE', display: 'SH2701' }] : []
+        data = query?.startsWith('SH') ? [{ value: 'SH2701', display: '烧碱SH2701', exchange: 'CZCE', symbol: 'CZCE.SH701' }] : []
       }
       else if (last === 'contracts' && method === 'POST') {
         contractRequests.push(body)
@@ -165,7 +165,7 @@ async function main() {
     holdSuggestions = false
     releaseSuggestions()
     await dialog.getByRole('status').getByText('暂无匹配候选；可输入完整合约代码后点击验证。', { exact: true }).waitFor()
-    assert.equal(await page.getByRole('option', { name: 'SH2701 CZCE' }).isVisible(), false, '迟到结果不能覆盖新输入')
+    assert.equal(await page.getByRole('option', { name: '烧碱SH2701 CZCE' }).isVisible(), false, '迟到结果不能覆盖新输入')
     failSuggestions = true
     await codeInput.fill('FG701')
     await dialog.getByRole('status').getByText('模拟候选查询暂不可用，可输入完整合约后验证', { exact: true }).waitFor()
@@ -196,7 +196,7 @@ async function main() {
       assert.equal((await exchangeSelect.innerText()).trim(), '输入代码后自动选择', '未知或清空代码不能保留上一个交易所')
     }
     await codeInput.pressSequentially('sh')
-    await page.getByRole('option', { name: 'SH2701 CZCE' }).click()
+    await page.getByRole('option', { name: '烧碱SH2701 CZCE' }).click()
     assert.equal(await codeInput.inputValue(), 'SH2701')
     assert.equal((await exchangeSelect.innerText()).trim(), '郑商所 CZCE')
     assert.ok((await dialog.locator('.recognition').first().innerText()).includes('数据代码 SH701'))
