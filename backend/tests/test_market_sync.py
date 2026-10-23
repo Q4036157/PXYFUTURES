@@ -145,7 +145,7 @@ def test_sync_loop_publishes_rollover_without_fixed_sleep() -> None:
     assert received[0].received_at_ns == 456
 
 
-def test_sync_loop_waits_for_credentials_change_without_retry_storm() -> None:
+def test_sync_loop_waits_for_credentials_change_without_retry_storm(caplog) -> None:
     stop_event = asyncio.Event()
 
     class Repository(EmptyFollowups):
@@ -168,7 +168,10 @@ def test_sync_loop_waits_for_credentials_change_without_retry_storm() -> None:
 
     async def run() -> None:
         async def unlock() -> None:
-            await asyncio.sleep(0.02)
+            # 等待服务实际进入认证暂停，避免线程调度较慢时先保存、后暂停而永久等待。
+            async with asyncio.timeout(5):
+                while not any("后台行情认证已暂停" in record.getMessage() for record in caplog.records):
+                    await asyncio.sleep(0.001)
             client.credential_revision += 1
 
         unlock_task = asyncio.create_task(unlock())

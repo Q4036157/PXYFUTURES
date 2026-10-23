@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api.signals import _SUPPORTED_ALERT_DURATIONS
 from app.services.auth import current_user_id
-from app.services.followup_alerts import CONDITIONS, STATES, FollowupAlertService
+from app.services.followup_alerts import CONDITIONS, STATES, FollowupAlertService, SourceConflict
 
 router = APIRouter(prefix="/api/followup-alerts", tags=["二级预警"])
 
@@ -42,6 +42,15 @@ class FollowupBody(BaseModel):
         return list(dict.fromkeys(values))
 
 
+class ObservedSource(FollowupSource):
+    confirmed_bar_time: str = Field(min_length=1, max_length=50)
+
+
+class SourceReplacement(BaseModel):
+    previous: FollowupSource
+    observed: ObservedSource
+
+
 def _service(request: Request) -> FollowupAlertService:
     return request.app.state.followup_alerts
 
@@ -73,6 +82,22 @@ async def claim_notifications(request: Request, user_id: str = Depends(current_u
     return {"notifications": await asyncio.to_thread(
         _service(request).repository.claim_followup_notifications, user_id,
     )}
+
+
+@router.post("/{rule_id}/source")
+async def replace_source(
+    rule_id: int, body: SourceReplacement, request: Request, user_id: str = Depends(current_user_id),
+) -> dict:
+    service = _service(request)
+    try:
+        await asyncio.to_thread(
+            service.replace_source, user_id, rule_id, body.previous.model_dump(), body.observed.model_dump(),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SourceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"rules": await asyncio.to_thread(service.list_rules, user_id)}
 
 
 @router.delete("/{rule_id}", status_code=204)

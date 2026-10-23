@@ -21,6 +21,7 @@ async function main() {
   let sockets = [], scanSignals = [], failOrder = false, releaseOrder = null, holdOrder = false
   let followupRules = [], followupNotifications = [], followupRequests = [], nextFollowupId = 1
   let followupAlreadyMatches = false, failFollowupSave = false, failFollowupDelete = false
+  let failSourceReplace = false
   let holdSuggestions = false, releaseSuggestions = null, failSuggestions = false
   page.on('pageerror', error => errors.push(error.message))
   await page.addInitScript(() => {
@@ -43,6 +44,15 @@ async function main() {
       if (url.pathname.includes('/api/followup-alerts')) {
         if (last === 'claim') {
           data = { notifications: followupNotifications.splice(0) }
+        } else if (last === 'source' && method === 'POST') {
+          if (failSourceReplace) return route.fulfill({ status: 409, json: { detail: '当前收盘状态已更新，请重新查看对比后更换' } })
+          const rule = followupRules.find(rule => rule.id === Number(parts.at(-2)))
+          assert.deepEqual(body.previous, rule.source)
+          assert.deepEqual(body.observed, rule.source_current)
+          const { confirmed_bar_time, ...baseline } = rule.source_current
+          rule.source = baseline
+          rule.source_changed = false
+          data = { rules: followupRules }
         } else if (method === 'DELETE') {
           if (failFollowupDelete) return route.fulfill({ status: 500, json: { detail: '模拟二级条件删除失败' } })
           followupRules = followupRules.filter(rule => rule.id !== Number(last))
@@ -59,6 +69,8 @@ async function main() {
             trigger_count: followupAlreadyMatches ? 1 : 0,
             status: followupAlreadyMatches ? '条件已满足' : '监控中',
           }
+          rule.source_current = { ...rule.source, confirmed_bar_time: '2026-10-23T12:00:00+08:00' }
+          rule.source_changed = false
           followupRules.push(rule)
           if (followupAlreadyMatches) followupNotifications.push(structuredClone(rule))
           data = { created_id: rule.id, rules: followupRules }
@@ -357,7 +369,7 @@ async function main() {
     assert.deepEqual(followupRequests.at(-1).conditions, ['空空死叉'])
     assert.deepEqual(followupRequests.at(-1).states, ['下跌'])
     assert.equal(await page.locator('.followup-rule').count(), 1)
-    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00 触发')
+    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00')
     assert.equal(await page.evaluate(() => window.__followupTones), 6)
     const popupPosition = await page.locator('.followup-popup').evaluate(node => {
       const popup = node.getBoundingClientRect(), panel = node.closest('.followup-center').getBoundingClientRect()
@@ -372,7 +384,7 @@ async function main() {
     assert.equal(await page.evaluate(() => window.__followupTones), 6)
     await page.reload()
     await page.waitForSelector('.followup-rule')
-    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00 触发')
+    assert.equal((await page.locator('.followup-time').textContent()).trim(), '2026-10-23 12:00')
     assert.equal(await page.locator('.followup-popup').count(), 0)
     assert.equal(await page.evaluate(() => window.__followupTones), 0)
     results.push('一级整行可点击、三栏设置、保存失败保留选择、已满足立即提醒、独立提示音、红框内右上角提示、刷新不重响')
@@ -387,6 +399,47 @@ async function main() {
     assert.deepEqual(followupRequests.at(-1).conditions, [])
     assert.equal(await page.locator('.followup-time').last().textContent(), '')
     const twoConditions = await page.locator('.followup-target').allTextContents()
+    assert.deepEqual(await page.locator('.followup-columns > span').allTextContents(), ['固定条件', '状态', '变换条件', '删除', '触发时间（北京时间）'])
+    assert.equal(await page.locator('.followup-source-dot.normal').count(), 2)
+    assert.ok((await page.locator('.followup-source').first().innerText()).startsWith('CZCE.'))
+    assert.equal(await page.locator('.followup-rule').first().innerText().then(text => /一级条件|二级条件|\+\d/.test(text)), false)
+    const sourceBefore = structuredClone(followupRules[0].source)
+    const priorTrigger = await page.locator('.followup-time').first().textContent()
+    for (const rule of followupRules) {
+      rule.source_current = { ...rule.source, condition: '空空死叉', state: '下跌', confirmed_bar_time: '2026-10-23T12:05:00+08:00' }
+      rule.source_changed = true
+    }
+    await page.waitForFunction(() => document.querySelectorAll('.followup-source-dot.changed').length === 2, null, { timeout: 6000 })
+    assert.ok((await page.locator('.followup-source-dot').first().getAttribute('title')).includes('反弹 → 下跌'))
+    followupRules[1].source_current = { ...followupRules[1].source, confirmed_bar_time: '2026-10-23T12:10:00+08:00' }
+    followupRules[1].source_changed = false
+    await page.waitForFunction(() => document.querySelectorAll('.followup-source-dot.normal').length === 1, null, { timeout: 6000 })
+    followupRules[1].source_current = { ...followupRules[1].source, condition: '空空死叉', state: '下跌', confirmed_bar_time: '2026-10-23T12:15:00+08:00' }
+    followupRules[1].source_changed = true
+    await page.locator('.followup-source').first().click()
+    const reviewDialog = page.getByRole('dialog', { name: '固定条件对比' })
+    await reviewDialog.waitFor()
+    assert.ok((await reviewDialog.innerText()).includes('当前已收盘状态'))
+    assert.ok((await reviewDialog.innerText()).includes('空空死叉'))
+    await reviewDialog.screenshot({ path: path.join(screenshotDir, 'pxyfutures-fixed-condition-review.png') })
+    failSourceReplace = true
+    await reviewDialog.getByRole('button', { name: '更换', exact: true }).click()
+    await reviewDialog.getByText('当前收盘状态已更新，请重新查看对比后更换', { exact: true }).waitFor()
+    assert.deepEqual(followupRules[0].source, sourceBefore)
+    failSourceReplace = false
+    await reviewDialog.getByRole('button', { name: '更换', exact: true }).click()
+    await reviewDialog.waitFor({ state: 'hidden' })
+    assert.equal(followupRules[0].source.state, '下跌')
+    assert.deepEqual(followupRules[1].source, sourceBefore)
+    assert.equal(await page.locator('.followup-source-dot.changed').count(), 1)
+    assert.equal(await page.locator('.followup-time').first().textContent(), priorTrigger)
+    assert.deepEqual(await page.locator('.followup-target').allTextContents(), twoConditions)
+    await page.locator('.followup-center').screenshot({ path: path.join(screenshotDir, 'pxyfutures-fixed-condition-table.png') })
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    assert.equal(await page.locator('.followup-source-dot.normal').count(), 1)
+    assert.equal(await page.locator('.followup-source-dot.changed').count(), 1)
+    results.push('固定条件竖列、红蓝圆点、状态恢复、对比框、更换失败保留、单行更换与刷新恢复，目标与时间不变')
     await alertPanel.getByRole('button', { name: '上涨', exact: true }).click()
     assert.deepEqual(await page.locator('.followup-target').allTextContents(), twoConditions)
     await alertPanel.getByRole('button', { name: '上涨', exact: true }).click()

@@ -74,16 +74,20 @@ export interface ContractSignals {
   market_status?: 'active' | 'expired' | 'unknown'
 }
 
+export interface FollowupSource {
+  duration_seconds: number
+  period_label: string
+  condition: string | null
+  state: string
+}
+
 export interface FollowupRule {
   id: number
   contract_id: number
   symbol: string
-  source: {
-    duration_seconds: number
-    period_label: string
-    condition: string | null
-    state: string
-  }
+  source: FollowupSource
+  source_current?: (FollowupSource & { confirmed_bar_time: string }) | null
+  source_changed?: boolean | null
   duration_seconds: number
   conditions: string[]
   states: string[]

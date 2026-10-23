@@ -7,6 +7,7 @@ from collections.abc import Callable
 from threading import RLock
 from typing import Any
 
+from app.services.followup_sources import FollowupSourceMonitor, SourceScanner, source_identity
 from app.services.market_sync import MarketSyncEvent
 from app.services.repository import ConfigRepository, ContractConfig, PeriodConfig
 from app.services.runtime_notices import RuntimeNoticeLimiter
@@ -24,12 +25,17 @@ CONDITIONS = frozenset(
 STATES = frozenset({"上涨", "回调", "多震荡", "下跌", "反弹", "空震荡"})
 
 
+class SourceConflict(ValueError):
+    """对比框中的条件已变化，需要重新查看。"""
+
+
 class FollowupAlertService:
     """独立于主列表筛选和网页连接，按收盘顺序推进每条条件单。"""
 
     def __init__(
         self, repository: ConfigRepository, scanner: FollowupScanner,
         contract_status: Callable[[str], str] | None = None,
+        source_scanner: SourceScanner | None = None,
     ) -> None:
         self.repository = repository
         self._scanner = scanner
@@ -37,6 +43,37 @@ class FollowupAlertService:
         self._lock = RLock()
         self._wake = asyncio.Event()
         self._history_checked: set[int] = set()
+        self._sources = FollowupSourceMonitor(repository, source_scanner) if source_scanner else None
+        self._source_notices = RuntimeNoticeLimiter(logger)
+
+    def _refresh_sources(self, rules: list[Rule]) -> None:
+        if self._sources is None:
+            return
+        for rule in rules:
+            self._sources.current.pop(rule["id"], None)
+        try:
+            self._sources.refresh(rules, self._contract_status)
+            self._source_notices.recover("followup-source", "固定条件状态检查已恢复")
+        except Exception:  # noqa: BLE001
+            self._source_notices.warning("followup-source", "固定条件状态检查暂不可用，目标监控继续运行", exc_info=True)
+
+    def replace_source(self, user_id: str, rule_id: int, previous: Rule, observed: Rule) -> None:
+        with self._lock:
+            rule = next((r for r in self.repository.list_followup_alerts(user_id) if r["id"] == rule_id), None)
+            if rule is None:
+                raise LookupError("条件单不存在")
+            self._refresh_sources([rule])
+            current = self._sources.current.get(rule_id) if self._sources else None
+            if current is None:
+                raise SourceConflict("固定条件的当前收盘状态暂不可用，请稍后重新查看")
+            if source_identity(previous) != source_identity(rule["source"]):
+                raise SourceConflict("固定条件已在其他页面更换，请重新查看后操作")
+            if (source_identity(observed) != source_identity(current)
+                    or observed.get("confirmed_bar_time") != current["confirmed_bar_time"]):
+                raise SourceConflict("当前收盘状态已更新，请重新查看对比后更换")
+            baseline = {key: value for key, value in current.items() if key != "confirmed_bar_time"}
+            if not self.repository.replace_followup_source(user_id, rule_id, rule["symbol"], rule["source"], baseline):
+                raise SourceConflict("条件单已被修改，请重新查看")
 
     async def publish_rollovers(self, _event: MarketSyncEvent) -> None:
         self.wake()
@@ -101,6 +138,9 @@ class FollowupAlertService:
     def evaluate(self) -> None:
         with self._lock:
             rules = self.repository.list_followup_alerts()
+            if self._sources:
+                self._sources.retain({r["id"] for r in rules})
+            self._refresh_sources(rules)
             self._history_checked.intersection_update(rule["id"] for rule in rules)
             if not rules:
                 return
@@ -203,6 +243,10 @@ class FollowupAlertService:
         return None
 
     def list_rules(self, user_id: str) -> list[Rule]:
+        with self._lock:
+            return self._list_rules(user_id)
+
+    def _list_rules(self, user_id: str) -> list[Rule]:
         contracts = {item.id: item for item in self.repository.list_contracts(user_id)}
         results: list[Rule] = []
         for rule in self.repository.list_followup_alerts(user_id):
@@ -217,8 +261,16 @@ class FollowupAlertService:
                 status = "等待收盘行情"
             else:
                 status = "条件已满足" if rule["matched"] else "监控中"
+            current = self._sources.current.get(rule["id"]) if self._sources else None
+            if (contract is None or contract.symbol != rule["symbol"]
+                    or (self._contract_status and self._contract_status(rule["symbol"]) == "expired")
+                    or not any(p.duration_seconds == rule["source"].get("duration_seconds") for p in contract.periods)):
+                current = None
             results.append({
-                key: value for key, value in {**rule, "status": status}.items()
+                key: value for key, value in {
+                    **rule, "status": status, "source_current": current,
+                    "source_changed": source_identity(current) != source_identity(rule["source"]) if current else None,
+                }.items()
                 if key not in {"user_id", "notified_count"}
             })
         return results

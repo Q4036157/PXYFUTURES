@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from app.api import followup_alerts as api
 from app.api.signals import _scan_cached_alert_jobs
 from app.config import settings
-from app.services.followup_alerts import FollowupAlertService
+from app.services.followup_alerts import FollowupAlertService, SourceConflict
+from app.services.followup_sources import FollowupSourceMonitor
 from app.services.market_sync import build_market_sync_jobs
 from app.services.repository import ConfigRepository, PeriodConfig
 
@@ -64,6 +65,150 @@ def test_existing_matching_state_is_immediate_and_survives_restart(setup_rule):
     restarted.evaluate()
     assert restarted.list_rules("owner")[0]["trigger_count"] == 1
     assert reloaded.claim_followup_notifications("owner") == []
+
+
+@pytest.fixture
+def setup_source(setup_rule):
+    repo, _contract, snapshots, _calls, service, signal, _create = setup_rule
+    source_calls = []
+    def source_scanner(_repo, jobs):
+        source_calls.append(jobs)
+        return list(snapshots), 0
+    service._sources = FollowupSourceMonitor(repo, source_scanner)
+    def fixed(index, state="反弹", cross="金叉", m4="多", m3="空"):
+        result = signal(index, state, cross, duration=7200)
+        result["trend"] = {"m4": m4, "m3": m3}
+        return result
+    return (*setup_rule, fixed, source_calls)
+
+
+def test_fixed_state_change_restore_and_count_progress_do_not_gate_target(setup_source):
+    repo, _, snapshots, _, service, signal, create, fixed, _ = setup_source
+    snapshots[:] = [fixed(0), signal(0, "反弹")]
+    create()
+    assert service.list_rules("owner")[0]["source_changed"] is False
+    snapshots[:] = [fixed(1), signal(1, "反弹")]
+    service.evaluate()
+    assert service.list_rules("owner")[0]["source_changed"] is False
+    snapshots[:] = [fixed(2, "下跌", "死叉", "空"), signal(2)]
+    service.evaluate()
+    rule = service.list_rules("owner")[0]
+    assert rule["source_changed"] is True
+    assert rule["source"]["state"] == "反弹"
+    assert rule["source_current"]["state"] == "下跌"
+    assert rule["trigger_count"] == 1
+    assert len(repo.claim_followup_notifications("owner")) == 1
+    triggered_at = rule["last_triggered_at"]
+    snapshots[:] = [fixed(3), signal(3, "反弹")]
+    service.evaluate()
+    rule = service.list_rules("owner")[0]
+    assert rule["source_changed"] is False
+    assert rule["last_triggered_at"] == triggered_at
+    snapshots[:] = [fixed(4), signal(4)]
+    service.evaluate()
+    assert service.list_rules("owner")[0]["trigger_count"] == 2
+    assert len(repo.claim_followup_notifications("owner")) == 1
+
+
+def test_replace_only_one_row_preserves_target_history_and_survives_restart(setup_source):
+    repo, _, snapshots, _, service, signal, create, fixed, source_calls = setup_source
+    snapshots[:] = [fixed(0), signal(0, "反弹"), signal(1)]
+    first, second = create(), create()
+    assert len(source_calls[-1]) == 1
+    repo.claim_followup_notifications("owner")
+    snapshots[:] = [fixed(2, "下跌", "死叉", "空"), signal(2)]
+    service.evaluate()
+    before = repo.list_followup_alerts()[0]
+    viewed = service.list_rules("owner")[0]
+    service.replace_source("owner", first, viewed["source"], viewed["source_current"])
+    first_row, second_row = service.list_rules("owner")
+    assert first_row["id"] == first and second_row["id"] == second
+    assert first_row["source"]["state"] == "下跌"
+    assert first_row["source_changed"] is False
+    assert second_row["source"]["state"] == "反弹" and second_row["source_changed"] is True
+    after = repo.list_followup_alerts()[0]
+    for key in ("duration_seconds", "conditions", "states", "last_bar_time", "last_triggered_at", "trigger_count", "notified_count"):
+        assert after[key] == before[key]
+    assert repo.claim_followup_notifications("owner") == []
+    restarted = FollowupAlertService(ConfigRepository(), service._scanner, source_scanner=service._sources.scanner)
+    restarted.evaluate()
+    assert restarted.list_rules("owner")[0]["source"]["state"] == "下跌"
+    assert restarted.list_rules("owner")[0]["source_changed"] is False
+    assert repo.claim_followup_notifications("owner") == []
+
+
+def test_replace_rechecks_latest_state_and_rejects_stale_other_page_or_other_owner(setup_source):
+    repo, _, snapshots, _, service, _, create, fixed, _ = setup_source
+    snapshots[:] = [fixed(0, "下跌", "死叉", "空")]
+    rule_id = create()
+    viewed = service.list_rules("owner")[0]
+    snapshots[:] = [fixed(1)]
+    with pytest.raises(SourceConflict, match="已更新"):
+        service.replace_source("owner", rule_id, viewed["source"], viewed["source_current"])
+    assert repo.list_followup_alerts()[0]["source"] == viewed["source"]
+    with pytest.raises(LookupError):
+        service.replace_source("other", rule_id, viewed["source"], viewed["source_current"])
+    snapshots[:] = [fixed(2, "下跌", "死叉", "空")]
+    service.evaluate()
+    viewed = service.list_rules("owner")[0]
+    service.replace_source("owner", rule_id, viewed["source"], viewed["source_current"])
+    with pytest.raises(SourceConflict, match="其他页面"):
+        service.replace_source("owner", rule_id, viewed["source"], viewed["source_current"])
+
+
+def test_unknown_source_and_scanner_failure_never_show_normal_or_stop_target(setup_source):
+    repo, _, snapshots, _, service, signal, create, fixed, _ = setup_source
+    snapshots[:] = [fixed(0), signal(0, "反弹")]
+    rule_id = create()
+    snapshots[:] = [signal(1)]
+    service.evaluate()
+    rule = service.list_rules("owner")[0]
+    assert rule["source_current"] is None and rule["source_changed"] is None
+    assert rule["trigger_count"] == 1
+    with pytest.raises(SourceConflict, match="暂不可用"):
+        service.replace_source("owner", rule_id, rule["source"], {})
+    def fail(*_args):
+        raise RuntimeError("模拟固定周期读取失败")
+    service._sources.scanner = fail
+    snapshots[:] = [fixed(2), signal(2, "反弹")]
+    service.evaluate()
+    snapshots[:] = [fixed(3), signal(3)]
+    service.evaluate()
+    rule = service.list_rules("owner")[0]
+    assert rule["source_changed"] is None and rule["trigger_count"] == 2
+    assert repo.claim_followup_notifications("owner")[0]["trigger_count"] == 2
+
+
+def test_source_monitor_uses_latest_valid_symbol_and_removed_period_is_unknown(setup_source):
+    repo, contract, snapshots, _, service, _, create, fixed, _ = setup_source
+    unknown = fixed(5)
+    unknown["symbol"] = "DCE.P2705"
+    historical = {**fixed(6), "data_status": "historical"}
+    snapshots[:] = [unknown, fixed(3), historical, fixed(1, "下跌", "死叉", "空")]
+    create()
+    rule = service.list_rules("owner")[0]
+    assert rule["source_current"]["confirmed_bar_time"] == fixed(3)["confirmed_bar_time"]
+    repo.delete_period("owner", contract.id, 7200)
+    assert service.list_rules("owner")[0]["source_current"] is None
+    service.evaluate()
+    assert service.list_rules("owner")[0]["source_changed"] is None
+
+
+def test_source_api_conflict_and_tenant_boundary(setup_source):
+    _, _, snapshots, _, service, _, create, fixed, _ = setup_source
+    snapshots[:] = [fixed(0, "下跌", "死叉", "空")]
+    rule_id = create()
+    rule = service.list_rules("owner")[0]
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(followup_alerts=service)))
+    body = api.SourceReplacement(previous=rule["source"], observed=rule["source_current"])
+    with pytest.raises(HTTPException) as forbidden:
+        asyncio.run(api.replace_source(rule_id, body, request, "other"))
+    assert forbidden.value.status_code == 404
+    result = asyncio.run(api.replace_source(rule_id, body, request, "owner"))
+    assert result["rules"][0]["source_changed"] is False
+    with pytest.raises(HTTPException) as stale:
+        asyncio.run(api.replace_source(rule_id, body, request, "owner"))
+    assert stale.value.status_code == 409
 
 
 def test_only_nonmatching_to_matching_transition_realerts_without_new_cross(setup_rule):
@@ -276,6 +421,26 @@ def test_replay_intermediate_bars_and_ignore_current_unclosed_bar(monkeypatch, t
         timezone_china(),
     ).isoformat()
     assert len({item["label"] for item in replayed}) > 1
+    repo.save_period("owner", contract.id, period)
+    service = FollowupAlertService(
+        repo, lambda r, jobs, cursors: _scan_cached_alert_jobs(r, jobs, replay_since=cursors),
+        source_scanner=lambda r, jobs: _scan_cached_alert_jobs(r, jobs),
+    )
+    latest = initial[-1]
+    baseline = {
+        "duration_seconds": 1800,
+        "condition": f"{latest['trend']['m4']}{latest['trend']['m3']}{latest['cross_type']}",
+        "state": latest["label"],
+    }
+    service.create_rule("owner", contract.id, baseline, 1800, [], ["下跌"])
+    before = service.list_rules("owner")[0]
+    assert before["source_changed"] is False
+    # 当前尚未收盘K线价格大幅变动，不得改变左侧已收盘状态。
+    repo.save_kline_bars(contract.symbol, 300, [(rows[-1][0], 9999.0)], requested_count=300, synced_at_ns=rows[-1][0])
+    service.evaluate()
+    after = service.list_rules("owner")[0]
+    assert after["source_current"] == before["source_current"]
+    assert after["source_changed"] is False
 
 
 @pytest.mark.parametrize("legacy", [False, True])

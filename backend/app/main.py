@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
         app.state.config_repository,
         lambda repo, jobs, cursors: signals._scan_cached_alert_jobs(repo, jobs, replay_since=cursors),
         app.state.tq_client.contract_status,
+        source_scanner=lambda repo, jobs: signals._scan_cached_alert_jobs(repo, jobs),
     )
     app.state.market_sync_stop = asyncio.Event()
     app.state.followup_alert_task = asyncio.create_task(

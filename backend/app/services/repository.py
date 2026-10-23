@@ -473,6 +473,22 @@ class ConfigRepository:
                 "DELETE FROM followup_alerts WHERE id = ? AND user_id = ?", (rule_id, user_id),
             ).rowcount > 0
 
+    def replace_followup_source(
+        self, user_id: str, rule_id: int, symbol: str,
+        previous: dict[str, object], current: dict[str, object],
+    ) -> bool:
+        """仅更新所属账号这一行固定条件，目标游标和提醒计数保持原值。"""
+        with self._connect() as conn:
+            return conn.execute(
+                """UPDATE followup_alerts SET source_json = ?
+                   WHERE id = ? AND user_id = ? AND symbol = ? AND source_json = ?
+                   AND EXISTS (SELECT 1 FROM contracts
+                               WHERE contracts.id = followup_alerts.contract_id
+                               AND contracts.user_id = ? AND contracts.symbol = ?)""",
+                (json.dumps(current, ensure_ascii=False), rule_id, user_id, symbol,
+                 json.dumps(previous, ensure_ascii=False), user_id, symbol),
+            ).rowcount > 0
+
     def load_kline_bars(self, symbol: str, duration_seconds: int, count: int) -> list[tuple[int, float]]:
         """读取最近 count 根本地 K 线，并保持时间升序。"""
         with self._connect() as conn:
