@@ -20,5 +20,8 @@ export function recognizeContract(input: string): ContractRecognition {
   const exchange = product ? PRODUCT_EXCHANGES[product] ?? null : null
   const suffix = code.slice(letters.length)
   const standardCode = product ? `${product}${suffix}` : code
-  return { code: standardCode, exchange, exchangeName: exchange ? exchangeNames[exchange] ?? null : null, complete: Boolean(product && /^\d{3,4}$/.test(suffix)) }
+  const complete = Boolean(product && /^\d{3,4}$/.test(suffix)
+    && Number(suffix.slice(-2)) >= 1 && Number(suffix.slice(-2)) <= 12
+    && (suffix.length === 4 || exchange === 'CZCE'))
+  return { code: standardCode, exchange, exchangeName: exchange ? exchangeNames[exchange] ?? null : null, complete }
 }

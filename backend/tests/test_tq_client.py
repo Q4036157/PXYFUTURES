@@ -1,9 +1,17 @@
+import asyncio
+from time import monotonic
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from app.market.tq_client import ContractUnavailable, TqClient, _TqConnectionNoticeLimiter
+from app.market import tq_client
+from app.market.tq_client import (
+    ContractUnavailable,
+    MarketDataUnavailable,
+    TqClient,
+    _TqConnectionNoticeLimiter,
+)
 from app.services.repository import KlineSyncState
 
 
@@ -44,6 +52,24 @@ class FakeQuoteApi:
 class FakeSymbolApi:
     def __init__(self) -> None:
         self.calls = 0
+        self.loop = asyncio.new_event_loop()
+
+    def create_task(self, coroutine):
+        return self.loop.create_task(coroutine)
+
+    def wait_update(self, **_kwargs):
+        self.loop.run_until_complete(asyncio.sleep(0))
+        return True
+
+    def close(self):
+        if self.loop.is_closed():
+            return
+        pending = asyncio.all_tasks(self.loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        self.loop.close()
 
     def query_quotes(self, **kwargs: object) -> list[str]:
         self.calls += 1
@@ -56,8 +82,8 @@ class FakeSymbolApi:
         return ["DCE.v2609", "DCE.v2610", "SHFE.au2609"]
 
 
-class FakeCzceSymbolApi:
-    def query_quotes(self, **kwargs: object) -> list[str]:
+class FakeCzceSymbolApi(FakeSymbolApi):
+    async def query_quotes(self, **kwargs: object) -> list[str]:
         assert kwargs == {
             "ins_class": "FUTURE",
             "exchange_id": "CZCE",
@@ -65,6 +91,20 @@ class FakeCzceSymbolApi:
             "expired": False,
         }
         return ["CZCE.OI609", "CZCE.OI611", "DCE.v2609"]
+
+
+@pytest.fixture
+def symbol_api():
+    instances = []
+
+    def create(api_type=FakeSymbolApi):
+        api = api_type()
+        instances.append(api)
+        return api
+
+    yield create
+    for api in instances:
+        api.close()
 
 
 class FakeKlineCache:
@@ -196,8 +236,8 @@ def test_active_future_validation_rejects_unavailable_contract(
         client.require_active_future("DCE.V2609")
 
 
-def test_active_future_suggestions_are_cached_and_limited_to_the_exchange() -> None:
-    api = FakeSymbolApi()
+def test_active_future_suggestions_are_cached_and_limited_to_the_exchange(symbol_api) -> None:
+    api = symbol_api()
     client = TqClient()
     client._api = api
 
@@ -206,8 +246,86 @@ def test_active_future_suggestions_are_cached_and_limited_to_the_exchange() -> N
     assert api.calls == 1
 
 
-def test_active_future_suggestions_use_czce_product_case() -> None:
+def test_active_future_suggestions_use_czce_product_case(symbol_api) -> None:
     client = TqClient()
-    client._api = FakeCzceSymbolApi()
+    client._api = symbol_api(FakeCzceSymbolApi)
 
     assert client.list_active_futures("czce", "oi") == ["CZCE.OI609", "CZCE.OI611"]
+
+
+def test_cached_suggestions_do_not_wait_for_market_lock(symbol_api) -> None:
+    client = TqClient()
+    client._api = symbol_api()
+    expected = client.list_active_futures("DCE", "V")
+    assert client._lock.acquire(blocking=False)
+    try:
+        assert client.list_active_futures("DCE", "V") == expected
+    finally:
+        client._lock.release()
+
+
+def test_uncached_suggestions_fail_promptly_when_market_lock_is_busy(monkeypatch) -> None:
+    client = TqClient()
+    monkeypatch.setattr(tq_client, "_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS", 0)
+    with client._lock, pytest.raises(MarketDataUnavailable, match="行情同步繁忙"):
+        client.list_active_futures("CZCE", "SH")
+
+
+def test_catalog_timeout_cancels_query_and_releases_market_lock(symbol_api, monkeypatch) -> None:
+    class SlowApi(FakeSymbolApi):
+        async def query_quotes(self, **_kwargs):
+            self.calls += 1
+            await asyncio.Event().wait()
+
+    api = symbol_api(SlowApi)
+    client = TqClient()
+    client._api = api
+    monkeypatch.setattr(tq_client, "_CONTRACT_QUERY_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(MarketDataUnavailable, match="查询超时"):
+        client.list_active_futures("CZCE", "SH")
+    api.wait_update()
+    assert not asyncio.all_tasks(api.loop)
+    assert not client._active_contract_cache
+    assert client._lock.acquire(blocking=False)
+    client._lock.release()
+
+
+def test_expired_catalog_is_not_reused_and_cache_is_bounded(symbol_api) -> None:
+    api = symbol_api()
+    client = TqClient()
+    client._api = api
+    client._active_contract_cache[("DCE", "V")] = (monotonic() - 301, ("DCE.v1901",))
+    for index in range(128):
+        client._active_contract_cache[("OTHER", str(index))] = (monotonic(), ())
+    assert client.list_active_futures("DCE", "V") == ["DCE.v2609", "DCE.v2610"]
+    assert len(client._active_contract_cache) == 128
+    assert api.calls == 1
+    client.close()
+    assert not client._active_contract_cache
+
+
+def test_unready_catalog_query_does_not_start_a_connection(monkeypatch) -> None:
+    client = TqClient()
+
+    def unexpected_connection():
+        pytest.fail("候选查询不应阻塞于新连接的认证和初始化")
+
+    monkeypatch.setattr(client, "_get_api", unexpected_connection)
+    with pytest.raises(MarketDataUnavailable, match="连接尚未就绪"):
+        client.list_active_futures("CZCE", "SH")
+
+
+def test_failed_catalog_query_recovers_without_caching_failure(symbol_api) -> None:
+    class FlakyApi(FakeSymbolApi):
+        def query_quotes(self, **kwargs):
+            if not self.calls:
+                self.calls += 1
+                raise RuntimeError("模拟合约服务不可用")
+            return super().query_quotes(**kwargs)
+
+    client = TqClient()
+    client._api = symbol_api(FlakyApi)
+    with pytest.raises(MarketDataUnavailable):
+        client.list_active_futures("DCE", "V")
+    assert not client._active_contract_cache
+    assert client.list_active_futures("DCE", "V") == ["DCE.v2609", "DCE.v2610"]

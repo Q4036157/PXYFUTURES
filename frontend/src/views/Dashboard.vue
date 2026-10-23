@@ -36,7 +36,9 @@ const refreshing = ref(false)
 const errorText = ref('')
 const adding = ref(false)
 const changingContract = ref(false)
-const suggestionLoading = ref(false)
+const suggestionHint = ref('')
+let suggestionVersion = 0
+let suggestionController: RequestController | null = null
 const addVisible = ref(false)
 const contractEditVisible = ref(false)
 const periodVisible = ref(false)
@@ -631,27 +633,49 @@ async function fetchContractSuggestions(
   query: string,
   callback: (items: ContractSuggestion[]) => void,
 ): Promise<void> {
+  cancelContractSuggestions()
+  // 先结束组件自带的遮挡式加载，在输入框下方显示查询状态。
+  callback([])
   if (!recognizeContract(query).exchange) {
-    callback([])
     return
   }
-  suggestionLoading.value = true
+  const version = suggestionVersion
+  const controller = createRequestController()
+  suggestionController = controller
+  suggestionHint.value = '正在查询当前可用合约…'
   try {
-    const { data } = await client.get<ContractSuggestion[]>('/contracts/suggestions', { params: { query } })
+    const { data } = await client.get<ContractSuggestion[]>('/contracts/suggestions', {
+      params: { query }, signal: controller.signal, timeout: 3_500,
+    })
+    if (version !== suggestionVersion || controller.aborted) return
     callback(data.map((item) => ({ ...item, display: displayContractCode(item.value) })))
-  } catch {
+    suggestionHint.value = data.length ? '' : '暂无匹配候选；可输入完整合约代码后点击验证。'
+  } catch (error: any) {
+    if (version !== suggestionVersion || controller.aborted) return
     callback([])
+    suggestionHint.value = error.response?.data?.detail || '候选查询暂不可用；可输入完整合约代码后点击验证。'
   } finally {
-    suggestionLoading.value = false
+    if (version === suggestionVersion) {
+      suggestionController = null
+    }
   }
 }
 
+function cancelContractSuggestions(): void {
+  suggestionVersion += 1
+  suggestionController?.abort()
+  suggestionController = null
+  suggestionHint.value = ''
+}
+
 function selectContractSuggestion(item: ContractSuggestion): void {
+  cancelContractSuggestions()
   form.value.code = item.display
   form.value.exchange = item.exchange
 }
 
 function openContractEdit(contract: ContractConfig): void {
+  cancelContractSuggestions()
   editingContract.value = contract
   contractEditForm.value = {
     exchange: contract.exchange,
@@ -662,12 +686,14 @@ function openContractEdit(contract: ContractConfig): void {
 }
 
 function handleContractEditCodeInput(value: string): void {
+  cancelContractSuggestions()
   const result = recognizeContract(value)
   contractEditForm.value.code = value.replace(/\s+/g, '').toUpperCase()
   contractEditForm.value.exchange = result.exchange ?? ''
 }
 
 function selectContractEditSuggestion(item: ContractSuggestion): void {
+  cancelContractSuggestions()
   contractEditForm.value.code = item.display
   contractEditForm.value.exchange = item.exchange
 }
@@ -693,6 +719,7 @@ async function loadContracts(allowDuringOrderSave = false): Promise<void> {
 }
 
 function openAddContract(groupId: number | null = activeGroupId.value): void {
+  cancelContractSuggestions()
   form.value = { exchange: '', code: '', name: '', group_id: groupId }
   addVisible.value = true
 }
@@ -1006,6 +1033,7 @@ async function updateContract(): Promise<void> {
 }
 
 function handleContractCodeInput(value: string): void {
+  cancelContractSuggestions()
   // 自动补全先发出输入事件，再更新绑定值，识别必须使用本次事件值。
   const result = recognizeContract(value)
   // 保留用户输入的 PVC/PV 显示名，只规范大小写；提交时由后端转为数据源标准代码 V。
@@ -1128,6 +1156,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  cancelContractSuggestions()
   dashboardMounted = false
   panelResizeObserver?.disconnect()
   panelResizeObserver = null
@@ -1321,14 +1350,14 @@ onBeforeUnmount(() => {
       </aside>
     </Transition>
 
-    <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close>
-      <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">已识别：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}，请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="上期能源 INE" value="INE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item><el-form-item label="所属分组"><el-select v-model="form.group_id" class="full-width"><el-option v-for="group in contractGroups" :key="group.id" :label="group.name" :value="group.id" /></el-select></el-form-item></el-form>
-      <template #footer><el-button :disabled="adding" @click="addVisible = false">取消</el-button><el-button type="primary" :loading="adding" @click="createContract">验证并添加</el-button></template>
+    <el-dialog v-model="addVisible" title="添加合约" width="420px" destroy-on-close @closed="cancelContractSuggestions">
+      <el-form label-position="top" @submit.prevent="createContract"><el-form-item label="合约代码"><el-autocomplete v-model="form.code" class="full-width" value-key="value" placeholder="例如 pv、fg 或 RB2609" :fetch-suggestions="fetchContractSuggestions" :debounce="150" :trigger-on-focus="false" @input="handleContractCodeInput" @select="selectContractSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: form.code && !recognition.exchange, incomplete: recognition.exchange && !recognition.complete }"><template v-if="recognition.exchange && recognition.complete">格式正确：{{ recognition.exchangeName }} {{ recognition.exchange }} · 数据代码 {{ recognition.code }}；添加时验证可用性</template><template v-else-if="recognition.exchange">已识别{{ recognition.exchangeName }}品种，请补全有效交割年月（例如 SH2701），月份为01至12</template><template v-else-if="form.code">未识别品种代码，请检查品种简称和月份。</template><template v-else>输入品种前缀后自动列出当前可用合约，大小写均可；PVC 可输入 pv 或 pvc。</template></div><div v-if="suggestionHint" class="recognition" role="status">{{ suggestionHint }}</div></el-form-item><el-form-item label="交易所"><el-select v-model="form.exchange" placeholder="输入代码后自动选择"><el-option label="郑商所 CZCE" value="CZCE" /><el-option label="大商所 DCE" value="DCE" /><el-option label="上期所 SHFE" value="SHFE" /><el-option label="上期能源 INE" value="INE" /><el-option label="中金所 CFFEX" value="CFFEX" /><el-option label="广期所 GFEX" value="GFEX" /></el-select></el-form-item><el-form-item label="显示名称"><el-input v-model="form.name" placeholder="可留空" /></el-form-item><el-form-item label="所属分组"><el-select v-model="form.group_id" class="full-width"><el-option v-for="group in contractGroups" :key="group.id" :label="group.name" :value="group.id" /></el-select></el-form-item></el-form>
+      <template #footer><el-button :disabled="adding" @click="addVisible = false">取消</el-button><el-button type="primary" :loading="adding" :disabled="!recognition.complete" @click="createContract">验证并添加</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="contractEditVisible" title="更换合约" width="420px" destroy-on-close>
-      <el-form label-position="top" @submit.prevent="updateContract"><el-form-item label="新合约代码"><el-autocomplete v-model="contractEditForm.code" class="full-width" value-key="value" placeholder="例如 pp 或 PP2701" :fetch-suggestions="fetchContractSuggestions" :loading="suggestionLoading" :trigger-on-focus="false" @input="handleContractEditCodeInput" @select="selectContractEditSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: contractEditForm.code && !contractEditRecognition.exchange, incomplete: contractEditRecognition.exchange && !contractEditRecognition.complete }"><template v-if="contractEditRecognition.exchange && contractEditRecognition.complete">已识别：{{ contractEditRecognition.exchangeName }} {{ contractEditRecognition.exchange }} · {{ contractEditRecognition.code }}</template><template v-else-if="contractEditRecognition.exchange">请选择下方当前可用合约，或继续输入交割月份</template><template v-else-if="contractEditForm.code">未识别品种代码，请检查品种简称和月份。</template></div></el-form-item></el-form>
-      <template #footer><el-button :disabled="changingContract" @click="contractEditVisible = false">取消</el-button><el-button type="primary" :loading="changingContract" @click="updateContract">验证并更换</el-button></template>
+    <el-dialog v-model="contractEditVisible" title="更换合约" width="420px" destroy-on-close @closed="cancelContractSuggestions">
+      <el-form label-position="top" @submit.prevent="updateContract"><el-form-item label="新合约代码"><el-autocomplete v-model="contractEditForm.code" class="full-width" value-key="value" placeholder="例如 pp 或 PP2701" :fetch-suggestions="fetchContractSuggestions" :debounce="150" :trigger-on-focus="false" @input="handleContractEditCodeInput" @select="selectContractEditSuggestion"><template #default="{ item }"><div class="contract-suggestion"><strong>{{ item.display }}</strong><span>{{ item.exchange }}</span></div></template></el-autocomplete><div class="recognition" :class="{ invalid: contractEditForm.code && !contractEditRecognition.exchange, incomplete: contractEditRecognition.exchange && !contractEditRecognition.complete }"><template v-if="contractEditRecognition.exchange && contractEditRecognition.complete">格式正确：{{ contractEditRecognition.exchangeName }} {{ contractEditRecognition.exchange }} · {{ contractEditRecognition.code }}；更换时验证可用性</template><template v-else-if="contractEditRecognition.exchange">请补全有效交割年月（例如 SH2701），月份为01至12</template><template v-else-if="contractEditForm.code">未识别品种代码，请检查品种简称和月份。</template></div><div v-if="suggestionHint" class="recognition" role="status">{{ suggestionHint }}</div></el-form-item></el-form>
+      <template #footer><el-button :disabled="changingContract" @click="contractEditVisible = false">取消</el-button><el-button type="primary" :loading="changingContract" :disabled="!contractEditRecognition.complete" @click="updateContract">验证并更换</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="periodVisible" class="period-dialog" :title="editPeriod ? '编辑周期' : '配置周期'" width="640px" destroy-on-close>

@@ -1,3 +1,5 @@
+import pytest
+
 from app.market.contract_catalog import normalize_contract_code, to_tq_symbol
 
 
@@ -44,6 +46,16 @@ def test_unknown_product_is_not_guessed() -> None:
     contract = normalize_contract_code("unknown2609")
     assert contract.exchange is None
     assert contract.complete is False
+
+
+@pytest.mark.parametrize("code", ["SH270", "SH2700", "SH2713", "SH2799", "RB701", "P701", "IF701", "LC701"])
+def test_invalid_month_or_short_non_czce_code_is_not_addable(code: str) -> None:
+    assert normalize_contract_code(code).complete is False
+
+
+@pytest.mark.parametrize("code", ["SH2701", "SH2712", "SH701", "RB2701", "P2712"])
+def test_valid_delivery_month_formats_are_addable(code: str) -> None:
+    assert normalize_contract_code(code).complete is True
 
 
 def test_pvc_alias_uses_dce_standard_code() -> None:

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from inspect import isawaitable
 from math import ceil
 from threading import Lock
 from time import monotonic, time, time_ns
@@ -31,6 +33,8 @@ _MAX_TQ_KLINE_BARS = 10_000
 _MAX_CACHED_BASE_BARS = 50_000
 _LIVE_KLINE_BARS = 10
 _CONNECTION_NOTICE_INTERVAL_SECONDS = 15 * 60
+_CONTRACT_QUERY_TIMEOUT_SECONDS = 2.0
+_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS = 0.5
 
 
 def _is_explicit_credential_rejection(error: BaseException) -> bool:
@@ -147,7 +151,10 @@ class TqClient:
         self._last_live_update_monotonic = 0.0
         self._remote_retry_after_monotonic = 0.0
         self._history_shortage_notices: set[tuple[str, int, int, int]] = set()
-        self._active_contract_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+        self._active_contract_cache: OrderedDict[
+            tuple[str, str], tuple[float, tuple[str, ...]]
+        ] = OrderedDict()
+        self._active_contract_cache_lock = Lock()
         self._connection_notice_limiter = _TqConnectionNoticeLimiter()
         self._live_kline_series: dict[tuple[str, int], _LiveKlineSeries] = {}
         self._credential_error: str | None = None
@@ -664,35 +671,71 @@ class TqClient:
         normalized_exchange = exchange.upper()
         normalized_product = product.upper()
         cache_key = (normalized_exchange, normalized_product)
-        now = monotonic()
-        with self._lock:
-            cached = self._active_contract_cache.get(cache_key)
-            if cached and now - cached[0] < 300:
-                return list(cached[1])
 
-            api = self._get_api()
-            try:
-                symbols = api.query_quotes(
+        def read_cache() -> list[str] | None:
+            with self._active_contract_cache_lock:
+                cached = self._active_contract_cache.get(cache_key)
+                if cached and monotonic() - cached[0] < 300:
+                    return list(cached[1])
+            return None
+
+        # 候选缓存不排队等待行情同步；只在缓存未命中时限时获取 SDK 锁。
+        cached_symbols = read_cache()
+        if cached_symbols is not None:
+            return cached_symbols
+        if not self._lock.acquire(timeout=_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS):
+            self._notices.warning("contract-suggestions", "可用合约查询暂不可用：行情锁等待超时")
+            raise MarketDataUnavailable("行情同步繁忙，可稍后重试候选查询，或输入完整合约后验证")
+        task = None
+        try:
+            cached_symbols = read_cache()
+            if cached_symbols is not None:
+                return cached_symbols
+            if self._api is None:
+                raise MarketDataUnavailable("行情连接尚未就绪，请稍后重试候选查询")
+            api = self._api
+
+            async def query_symbols() -> list[str]:
+                result = api.query_quotes(
                     ins_class="FUTURE",
                     exchange_id=normalized_exchange,
                     product_id=to_tq_product(normalized_exchange, normalized_product),
                     expired=False,
                 )
-            except Exception as exc:
-                logger.info(
-                    "天勤合约列表查询失败: exchange=%s product=%s",
-                    normalized_exchange,
-                    normalized_product,
-                    exc_info=True,
-                )
-                raise MarketDataUnavailable("暂时无法读取天勤可用合约，请稍后重试") from exc
+                return list(await result if isawaitable(result) else result)
 
+            # 在 SDK 协程中查询，避免同步接口内置的 30 秒等待阻塞行情刷新。
+            task = api.create_task(query_symbols())
+            deadline = monotonic() + _CONTRACT_QUERY_TIMEOUT_SECONDS
+            while not task.done():
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise MarketDataUnavailable("可用合约查询超时，可稍后重试，或输入完整合约后验证")
+                api.wait_update(deadline=time() + min(0.05, remaining))
+            symbols = task.result()
             prefix = f"{normalized_exchange}."
             active = tuple(
                 sorted({symbol for symbol in symbols if symbol.upper().startswith(prefix)})
             )
-            self._active_contract_cache[cache_key] = (now, active)
+            with self._active_contract_cache_lock:
+                self._active_contract_cache[cache_key] = (monotonic(), active)
+                self._active_contract_cache.move_to_end(cache_key)
+                while len(self._active_contract_cache) > 128:
+                    self._active_contract_cache.popitem(last=False)
+            self._notices.recover("contract-suggestions", "可用合约查询已恢复")
             return list(active)
+        except Exception as exc:
+            self._notices.warning(
+                "contract-suggestions", "可用合约查询未完成：exchange=%s product=%s 类型=%s",
+                normalized_exchange, normalized_product, type(exc).__name__,
+            )
+            if isinstance(exc, MarketDataUnavailable):
+                raise
+            raise MarketDataUnavailable("暂时无法读取天勤可用合约，请稍后重试") from exc
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+            self._lock.release()
 
     def close(self) -> None:
         with self._lock:
@@ -706,3 +749,5 @@ class TqClient:
             # K线 DataFrame 绑定创建它的 TqApi。连接关闭或凭据切换后继续
             # 复用这些对象不会再收到行情更新，必须让新连接重新订阅。
             self._live_kline_series.clear()
+            with self._active_contract_cache_lock:
+                self._active_contract_cache.clear()

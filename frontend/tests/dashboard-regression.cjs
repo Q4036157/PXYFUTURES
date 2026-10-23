@@ -20,6 +20,7 @@ async function main() {
   let sockets = [], scanSignals = [], failOrder = false, releaseOrder = null, holdOrder = false
   let followupRules = [], followupNotifications = [], followupRequests = [], nextFollowupId = 1
   let followupAlreadyMatches = false, failFollowupSave = false, failFollowupDelete = false
+  let holdSuggestions = false, releaseSuggestions = null, failSuggestions = false
   page.on('pageerror', error => errors.push(error.message))
   await page.addInitScript(() => {
     window.__followupTones = 0
@@ -77,9 +78,12 @@ async function main() {
         data = moved
       } else if (last === 'signals') data = { contract_id: Number(parts.at(-2)), symbol: 'CZCE.SR701', market_status: 'active', signals: periods.map(period => signal(0, fixture[0].contracts[0], period)), warnings: [] }
       else if (last === 'scan') data = { signals: scanSignals, requested: 6, failed: 0 }
-      else if (last === 'suggestions') data = url.searchParams.get('query')?.toUpperCase() === 'SH'
-        ? [{ value: 'SH2701', exchange: 'CZCE', display: 'SH2701' }]
-        : []
+      else if (last === 'suggestions') {
+        const query = url.searchParams.get('query')?.toUpperCase()
+        if (holdSuggestions && query === 'SH2701') await new Promise(resolve => { releaseSuggestions = resolve })
+        if (failSuggestions) return route.fulfill({ status: 503, json: { detail: '模拟候选查询暂不可用，可输入完整合约后验证' } })
+        data = query?.startsWith('SH') ? [{ value: 'SH2701', exchange: 'CZCE', display: 'SH2701' }] : []
+      }
       else if (last === 'contracts' && method === 'POST') {
         data = { ...body, id: 4, symbol: `${body.exchange}.${body.code}`, periods, sort_order: 3 }
         state[0].contracts.push(data)
@@ -135,10 +139,46 @@ async function main() {
     const dialog = page.getByRole('dialog', { name: '添加合约', exact: true })
     const codeInput = dialog.getByPlaceholder('例如 pv、fg 或 RB2609')
     const exchangeSelect = dialog.locator('.el-select').first()
+    for (const code of ['SH270', 'SH2700', 'SH2713', 'RB701', 'P701']) {
+      await codeInput.fill(code)
+      await page.waitForTimeout(50)
+      assert.equal(await dialog.getByRole('button', { name: '验证并添加', exact: true }).isDisabled(), true, `${code}不能作为完整合约提交`)
+      assert.ok((await dialog.locator('.recognition').first().innerText()).includes('月份为01至12'))
+    }
+    holdSuggestions = true
+    const slowRequest = page.waitForRequest(request => request.url().includes('/suggestions?query=SH2701'))
+    await codeInput.fill('SH2701')
+    await slowRequest
+    await dialog.getByRole('status').getByText('正在查询当前可用合约…', { exact: true }).waitFor()
+    assert.equal(await dialog.getByRole('button', { name: '验证并添加', exact: true }).isDisabled(), false)
+    assert.equal(await page.locator('.el-autocomplete__popper:visible').count(), 0, '慢查询不能用下拉加载框遮住交易所')
+    await codeInput.fill('p2701')
+    await page.waitForTimeout(50)
+    assert.equal((await exchangeSelect.innerText()).trim(), '大商所 DCE')
+    assert.ok(releaseSuggestions)
+    holdSuggestions = false
+    releaseSuggestions()
+    await dialog.getByRole('status').getByText('暂无匹配候选；可输入完整合约代码后点击验证。', { exact: true }).waitFor()
+    assert.equal(await page.getByRole('option', { name: 'SH2701 CZCE' }).isVisible(), false, '迟到结果不能覆盖新输入')
+    failSuggestions = true
+    await codeInput.fill('FG701')
+    await dialog.getByRole('status').getByText('模拟候选查询暂不可用，可输入完整合约后验证', { exact: true }).waitFor()
+    assert.equal(await dialog.getByRole('button', { name: '验证并添加', exact: true }).isDisabled(), false)
+    failSuggestions = false
+    holdSuggestions = true
+    const timeoutRequest = page.waitForRequest(request => request.url().includes('/suggestions?query=SH2701'))
+    await codeInput.fill('SH2701')
+    await timeoutRequest
+    await dialog.getByRole('status').getByText('候选查询暂不可用；可输入完整合约代码后点击验证。', { exact: true }).waitFor({ timeout: 5000 })
+    holdSuggestions = false
+    releaseSuggestions()
+    assert.equal(await dialog.getByRole('button', { name: '验证并添加', exact: true }).isDisabled(), false)
+    results.push('拒绝无效月份和非郑商所三位年月；慢查询不遮挡表单，旧请求取消，查询失败可继续验证')
     for (const [code, exchange] of [
       ['SH2701', '郑商所 CZCE'], ['p2701', '大商所 DCE'], ['rb2701', '上期所 SHFE'],
       ['sc2701', '上期能源 INE'], ['if2612', '中金所 CFFEX'], ['lc2701', '广期所 GFEX'],
       ['pv2701', '大商所 DCE'],
+      ['SH701', '郑商所 CZCE'],
     ]) {
       await codeInput.fill(code)
       await page.waitForTimeout(50)

@@ -80,5 +80,10 @@ def normalize_contract_code(value: str) -> ContractCode:
         code=standard_code,
         product=product,
         exchange=PRODUCT_EXCHANGES.get(product) if product else None,
-        complete=bool(_FULL_CONTRACT.fullmatch(code) and product),
+        complete=bool(
+            product
+            and _FULL_CONTRACT.fullmatch(code)
+            and 1 <= int(suffix[-2:]) <= 12
+            and (len(suffix) == 4 or PRODUCT_EXCHANGES.get(product) == "CZCE")
+        ),
     )
