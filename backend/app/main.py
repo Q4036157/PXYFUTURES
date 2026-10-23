@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import auth, contracts, followup_alerts, signals
 from app.api import settings as settings_api
 from app.config import settings
+from app.market.contract_directory import LocalContractDirectory
 from app.market.tq_client import TqClient
 from app.services.alert_stream import AlertStreamService
 from app.services.followup_alerts import FollowupAlertService
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.config_repository = ConfigRepository()
-    app.state.tq_client = TqClient()
+    app.state.tq_client = TqClient(LocalContractDirectory(settings.data_dir / "contract-directory.json"))
     app.state.alert_stream = AlertStreamService(
         app.state.config_repository,
         partial(signals.scan_cached_alerts_for_user, client=app.state.tq_client),

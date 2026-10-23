@@ -135,6 +135,9 @@ async def run_market_sync_loop(
     refresh_deadline = 0.0
     notices = RuntimeNoticeLimiter(logger)
     while not stop_event.is_set():
+        refresh_directory = getattr(client, "refresh_contract_directory", None)
+        if refresh_directory is not None:
+            await asyncio.to_thread(refresh_directory)
         now = monotonic()
         if now >= refresh_deadline:
             contracts = await asyncio.to_thread(repository.list_all_contracts)

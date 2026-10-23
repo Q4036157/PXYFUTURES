@@ -22,6 +22,11 @@ from app.market.boyi_kline import (
     should_rebuild_for_boyi,
 )
 from app.market.contract_catalog import to_tq_product, to_tq_symbol
+from app.market.contract_directory import (
+    SUPPORTED_EXCHANGES,
+    DirectoryContract,
+    LocalContractDirectory,
+)
 from app.market.ma_engine import Bar
 from app.services.repository import ConfigRepository, KlineSyncState
 from app.services.runtime_notices import RuntimeNoticeLimiter
@@ -145,8 +150,10 @@ class _TqConnectionNoticeLimiter:
 class TqClient:
     """以单个 TqApi 实例读取行情，所有调用由锁串行化。"""
 
-    def __init__(self) -> None:
+    def __init__(self, contract_directory: LocalContractDirectory | None = None) -> None:
         self._api: object | None = None
+        self._contract_directory = contract_directory
+        self._directory_retry_after = 0.0
         self._lock = Lock()
         self._last_live_update_monotonic = 0.0
         self._remote_retry_after_monotonic = 0.0
@@ -644,6 +651,21 @@ class TqClient:
 
     def require_active_future(self, symbol: str) -> str:
         """确认天勤当前存在指定的未下市期货合约，并返回天勤代码。"""
+        if self._contract_directory is not None:
+            directory = self._contract_directory
+            if not directory.validation_ready():
+                directory.request_refresh()
+                raise MarketDataUnavailable("本地合约目录正在同步，请稍后重试验证")
+            record = directory.get(to_tq_symbol(symbol))
+            if record is None or record.expires_at <= time():
+                directory.request_refresh()
+                raise ContractUnavailable(f"{symbol} 不在当前可用合约目录中或已下市；后台将刷新目录，请核对代码")
+            match = re.fullmatch(r"CZCE\.[A-Z]+(\d{2})(\d{2})", symbol.upper())
+            if match and (record.delivery_year != 2000 + int(match[1]) or record.delivery_month != int(match[2])):
+                raise ContractUnavailable(f"{symbol} 的交割年月与当前可用合约不符，请核对年份和月份")
+            self._remember_contract_status(symbol, "active")
+            self._remember_contract_status(record.symbol, "active")
+            return record.symbol
         if not self._lock.acquire(timeout=_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS):
             raise MarketDataUnavailable("行情同步繁忙，请稍后重试验证")
         try:
@@ -704,6 +726,12 @@ class TqClient:
 
     def list_active_futures(self, exchange: str, product: str) -> list[str]:
         """返回指定品种当前未下市的期货合约，结果短时缓存以减少合约服务请求。"""
+        if self._contract_directory is not None:
+            symbols = self._contract_directory.candidates(exchange, product)
+            if symbols is None:
+                self._contract_directory.request_refresh()
+                raise MarketDataUnavailable("本地合约目录正在同步，请稍后重试候选查询")
+            return symbols
         normalized_exchange = exchange.upper()
         normalized_product = product.upper()
         cache_key = (normalized_exchange, normalized_product)
@@ -760,6 +788,52 @@ class TqClient:
             if isinstance(exc, MarketDataUnavailable):
                 raise
             raise MarketDataUnavailable("暂时无法读取天勤可用合约，请稍后重试") from exc
+        finally:
+            self._lock.release()
+
+    def contract_full_code(self, symbol: str) -> str:
+        """从目录交割年月生成完整输入代码，用于不完整前缀的候选匹配。"""
+        record = self._contract_directory.get(symbol) if self._contract_directory else None
+        return record.full_code if record else symbol.partition(".")[2].upper()
+
+    def refresh_contract_directory(self) -> None:
+        """由行情后台批量更新目录，前台不发起SDK请求。"""
+        directory = self._contract_directory
+        if directory is None or not directory.needs_refresh() or monotonic() < self._directory_retry_after:
+            return
+        self._directory_retry_after = monotonic() + 60
+        if not self._lock.acquire(timeout=_CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS):
+            return
+        started = monotonic()
+        stage = "连接"
+        try:
+            api = self._get_api()
+            stage = "批量查询与校验"
+
+            async def query_directory():
+                result = api.query_quotes(ins_class="FUTURE", expired=False)
+                symbols = list(await result if isawaitable(result) else result)
+                # 数据源还会返回海外连续合约；本系统只接入国内六个交易所的实月合约。
+                symbols = [s for s in symbols if s.partition(".")[0] in SUPPORTED_EXCHANGES]
+                if not symbols or len(symbols) > 10_000:
+                    raise ValueError("活跃合约列表数量异常")
+                result = api.query_symbol_info(symbols)
+                frame = await result if isawaitable(result) else result
+                records = [DirectoryContract.from_metadata(row) for row in frame.to_dict("records")]
+                if {r.symbol.upper() for r in records} != {s.upper() for s in symbols}:
+                    raise ValueError("合约目录元数据未完整返回")
+                return records
+
+            records = self._wait_contract_query(api, query_directory)
+            stage = "本地持久化"
+            directory.replace(records)
+            self._notices.recover("contract-directory", "本地合约目录同步已恢复")
+            logger.info("本地合约目录已更新: 合约=%d 耗时=%.3f秒", len(records), monotonic() - started)
+        except Exception as exc:  # noqa: BLE001
+            self._notices.warning(
+                "contract-directory", "合约目录同步未完成，保留上次快照并稍后重试: 阶段=%s 类型=%s",
+                stage, type(exc).__name__,
+            )
         finally:
             self._lock.release()
 
