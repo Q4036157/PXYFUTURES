@@ -443,13 +443,38 @@ async function main() {
     await alertPanel.getByRole('button', { name: '上涨', exact: true }).click()
     assert.deepEqual(await page.locator('.followup-target').allTextContents(), twoConditions)
     await alertPanel.getByRole('button', { name: '上涨', exact: true }).click()
+    const followupPanel = page.locator('.followup-center')
+    await followupPanel.getByRole('button', { name: '折叠', exact: true }).click()
+    await page.locator('.followup-list').waitFor({ state: 'hidden' })
+    assert.equal(await followupPanel.getByRole('button', { name: '展开', exact: true }).getAttribute('aria-expanded'), 'false')
+    await page.reload()
+    await page.waitForFunction(() => document.querySelectorAll('.followup-rule').length === 2)
+    assert.equal(await page.locator('.followup-list').isVisible(), false)
+    assert.ok(await followupPanel.evaluate(node => node.getBoundingClientRect().height < 80))
+    const tonesWhileCollapsed = await page.evaluate(() => window.__followupTones)
     followupRules[0].last_triggered_at = '2026-10-23T13:30:00+08:00'
     followupRules[0].trigger_count += 1
     followupNotifications.push(structuredClone(followupRules[0]))
     await page.waitForFunction(() => document.querySelector('.followup-time')?.textContent.includes('13:30'), null, { timeout: 5000 })
     assert.equal(await page.locator('.followup-rule').count(), 2)
     assert.equal(await page.locator('.followup-popup').count(), 1)
+    assert.equal(await page.locator('.followup-list').isVisible(), false)
+    assert.equal(await page.evaluate(() => window.__followupTones), tonesWhileCollapsed + 6)
+    assert.ok(await page.locator('.followup-popup').evaluate(node => node.scrollHeight <= node.clientHeight + 1))
     await page.getByRole('button', { name: '关闭二级预警提示', exact: true }).click()
+    await followupPanel.screenshot({ path: path.join(screenshotDir, 'pxyfutures-followup-collapsed.png') })
+    await followupPanel.getByRole('button', { name: '展开', exact: true }).click()
+    await page.locator('.followup-list').waitFor({ state: 'visible' })
+    await page.setViewportSize({ width: 1230, height: 1100 })
+    await followupPanel.screenshot({ path: path.join(screenshotDir, 'pxyfutures-followup-fit-1230.png') })
+    await page.reload()
+    await page.waitForSelector('.followup-rule')
+    assert.equal(await page.locator('.followup-list').isVisible(), true)
+    await followupPanel.getByRole('button', { name: '二级条件监控', exact: true }).click()
+    await page.locator('.followup-list').waitFor({ state: 'hidden' })
+    await page.getByRole('button', { name: '恢复布局', exact: true }).click()
+    await page.locator('.followup-list').waitFor({ state: 'visible' })
+    results.push('二级面板折叠展开与刷新记忆、标题点击、恢复布局、折叠时继续更新及声音弹窗提醒')
     failFollowupDelete = true
     await page.getByRole('button', { name: '删除二级条件单', exact: true }).first().click()
     await page.getByText('模拟二级条件删除失败', { exact: true }).waitFor()
@@ -462,7 +487,10 @@ async function main() {
     await page.waitForSelector('.followup-rule')
     assert.equal(await page.locator('.followup-rule').count(), 1)
     results.push('同品种多条独立条件、可只选状态、待触发时间留空、主筛选不影响条件单、再次触发更新原行、删除失败与独立删除持久化')
-    for (const width of [1440, 1024, 960, 721, 720, 390, 320]) {
+    followupRules[0].last_triggered_at = '2026-10-23T13:30:00+08:00'
+    followupRules[0].trigger_count = 1
+    await page.waitForFunction(() => document.querySelector('.followup-time')?.textContent.includes('13:30'), null, { timeout: 5000 })
+    for (const width of [1440, 1230, 1024, 960, 721, 720, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 })
       await page.waitForTimeout(100)
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `页面溢出：${width}`)
@@ -471,6 +499,17 @@ async function main() {
         return { right: bounds.right, width: bounds.width, rowSingleLine: getComputedStyle(node.querySelector('.followup-rule-text')).whiteSpace === 'nowrap' }
       })
       assert.ok(followupBounds.right <= width && followupBounds.width > 0 && followupBounds.rowSingleLine, `二级监控布局异常：${width}`)
+      const followupFit = await page.locator('.followup-list').evaluate(node => ({
+        noHorizontalScroll: node.scrollWidth <= node.clientWidth + 1,
+        cellsFit: [...node.querySelectorAll('.followup-rule > *')].every(cell => {
+          const row = cell.parentElement.getBoundingClientRect(), bounds = cell.getBoundingClientRect()
+          return bounds.width > 0 && bounds.left >= row.left - 1 && bounds.right <= row.right + 1
+        }),
+        timeFits: [...node.querySelectorAll('.followup-time')].every(cell => cell.scrollWidth <= cell.clientWidth + 1),
+      }))
+      assert.ok(followupFit.noHorizontalScroll && followupFit.cellsFit, `二级面板仍需左右滚动或列被裁切：${width}`)
+      if (width >= 721) assert.ok(followupFit.timeFits, `桌面触发时间未完整显示：${width}`)
+      if (width === 1024) await followupPanel.screenshot({ path: path.join(screenshotDir, 'pxyfutures-followup-fit-1024.png') })
       const bounds = await page.locator('.contract-row').evaluateAll(rows => rows.map(row => ({
         row: row.getBoundingClientRect(),
         action: row.querySelector('.contract-actions').getBoundingClientRect(),
@@ -500,7 +539,7 @@ async function main() {
       if ([1440, 390].includes(width)) await page.screenshot({ path: path.join(screenshotDir, `pxyfutures-sort-count-${width}.png`), fullPage: true })
     }
     assert.deepEqual(errors, [])
-    results.push('七种桌面和手机宽度交易所与合约代码同排、无溢出、代码与按钮可见、无页面异常')
+    results.push('八种桌面和手机宽度二级面板无左右滚动、桌面时间完整、单行分栏，合约代码与按钮可见、无页面异常')
     console.log(JSON.stringify({ passed: results.length, results }, null, 2))
   } finally { await context.close(); await browser.close() }
 }

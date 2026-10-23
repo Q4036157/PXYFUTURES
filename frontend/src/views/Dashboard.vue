@@ -20,7 +20,7 @@ import type {
   SignalSnapshot,
 } from '@/types/futures'
 
-type PanelKey = 'groups' | 'setup' | 'signals' | 'alerts'
+type PanelKey = 'groups' | 'setup' | 'signals' | 'alerts' | 'followup'
 type PanelSize = { width?: number; height?: number }
 
 const contracts = ref<ContractConfig[]>([])
@@ -115,22 +115,26 @@ const collapsedPanels = ref<Record<PanelKey, boolean>>({
   setup: false,
   signals: false,
   alerts: false,
+  followup: false,
 })
 const panelSizes = ref<Record<PanelKey, PanelSize>>({
   groups: {},
   setup: {},
   signals: {},
   alerts: {},
+  followup: {},
 })
 const groupsPanelRef = ref<HTMLElement | null>(null)
 const setupPanelRef = ref<HTMLElement | null>(null)
 const signalsPanelRef = ref<HTMLElement | null>(null)
 const alertsPanelRef = ref<HTMLElement | null>(null)
+const followupContainerRef = ref<HTMLElement | null>(null)
 const panelRefs = {
   groups: groupsPanelRef,
   setup: setupPanelRef,
   signals: signalsPanelRef,
   alerts: alertsPanelRef,
+  followup: followupContainerRef,
 }
 let panelResizeObserver: ResizeObserver | null = null
 const draggedContractId = ref<number | null>(null)
@@ -1327,7 +1331,7 @@ onBeforeUnmount(() => {
           <footer class="alert-center-footer"><span>仅监测当前账号自选合约已配置的周期</span><span v-if="notificationPermission === 'denied'">Windows通知未授权，声音和页面弹窗仍可使用</span><span v-else-if="notificationPermission === 'granted'">Windows通知已开启</span></footer>
         </div>
       </section>
-      <FollowupAlertPanel ref="followupPanel" :contracts="contracts" />
+      <div ref="followupContainerRef" class="followup-panel-wrap"><FollowupAlertPanel ref="followupPanel" :contracts="contracts" :collapsed="collapsedPanels.followup" @toggle="togglePanel('followup')" /></div>
     </section>
 
       </div>

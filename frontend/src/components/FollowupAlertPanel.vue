@@ -6,7 +6,8 @@ import { client } from '@/api/client'
 import { alertConditionOptions, alertStateOptions, commonPeriods } from '@/lib/alertOptions'
 import type { AlertSignalSnapshot, ContractConfig, FollowupRule } from '@/types/futures'
 
-const props = defineProps<{ contracts: ContractConfig[] }>()
+const props = defineProps<{ contracts: ContractConfig[], collapsed: boolean }>()
+const emit = defineEmits<{ toggle: [] }>()
 const rules = ref<FollowupRule[]>([])
 const dialogVisible = ref(false)
 const source = ref<AlertSignalSnapshot | null>(null)
@@ -254,17 +255,17 @@ defineExpose({ open })
 </script>
 
 <template>
-  <section class="followup-center" aria-label="二级条件监控">
-    <header class="followup-header"><h2>二级条件监控</h2><span>{{ rules.length }} 条条件单</span></header>
-    <p v-if="errorText" class="followup-error" role="status">{{ errorText }}</p>
-    <div class="followup-list">
+  <section class="followup-center" :class="{ collapsed }" aria-label="二级条件监控">
+    <header class="followup-header" @click="emit('toggle')"><h2><button type="button" :aria-expanded="!collapsed" aria-controls="followup-list" @click.stop="emit('toggle')">二级条件监控</button></h2><div class="followup-header-actions"><span>{{ rules.length }} 条条件单</span><button type="button" class="panel-toggle" :aria-expanded="!collapsed" aria-controls="followup-list" @click.stop="emit('toggle')">{{ collapsed ? '展开' : '折叠' }}</button></div></header>
+    <p v-if="errorText" v-show="!collapsed" class="followup-error" role="status">{{ errorText }}</p>
+    <div id="followup-list" v-show="!collapsed" class="followup-list">
       <div class="followup-columns" aria-hidden="true"><span>固定条件</span><span>状态</span><span>变换条件</span><span>删除</span><span>触发时间（北京时间）</span></div>
       <div v-for="rule in rules" :key="rule.id" class="followup-rule" :data-rule-id="rule.id">
         <button type="button" class="followup-source followup-rule-text" :title="sourceHint(rule)" :disabled="pendingAction" @click="openReview(rule)">{{ sourceText(rule) }}</button>
         <div class="followup-state-cell"><button type="button" class="followup-source-dot" :class="{ changed: rule.source_changed === true, normal: rule.source_changed === false }" :title="sourceHint(rule)" :aria-label="sourceHint(rule)" :disabled="pendingAction" @click="openReview(rule)"><span /></button></div>
         <span class="followup-target followup-rule-text" :title="`${targetText(rule)}；${rule.status}`">{{ targetText(rule) }}</span>
         <div class="followup-delete-cell"><button type="button" class="followup-delete" aria-label="删除二级条件单" :title="`删除 ${targetText(rule)}`" :disabled="pendingAction" @click="remove(rule)"><el-icon><Close /></el-icon></button></div>
-        <time class="followup-time" :datetime="rule.last_triggered_at || undefined" :title="`${rule.status}；最近一次进入目标条件的首根K线收盘时间（北京时间）`">{{ triggerTime(rule.last_triggered_at) || (rule.trigger_count ? '已满足，起点待确认' : '') }}</time>
+        <time class="followup-time" :datetime="rule.last_triggered_at || undefined" :title="`${triggerTime(rule.last_triggered_at)}；${rule.status}；最近一次进入目标条件的首根K线收盘时间（北京时间）`">{{ triggerTime(rule.last_triggered_at) || (rule.trigger_count ? '已满足，起点待确认' : '') }}</time>
       </div>
       <p v-if="!rules.length" class="followup-empty">暂无条件单</p>
     </div>
