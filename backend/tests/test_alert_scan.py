@@ -71,3 +71,9 @@ def test_alert_scan_uses_current_user_and_selected_configured_periods(monkeypatc
             "period": _period(1_800, "30分钟").__dict__,
         }
     ]
+
+
+def test_one_minute_is_an_accepted_alert_period() -> None:
+    body = signals.AlertScanBody(durations=[60])
+
+    assert body.durations == [60]

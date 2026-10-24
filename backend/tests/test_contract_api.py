@@ -44,7 +44,7 @@ def test_four_digit_alias_is_validated_then_stored_once_in_canonical_form(setup_
         assert result["code"] == "SH701"
         assert result["name"] == "烧碱"
         assert result["group_id"] == group.id
-        assert len(result["periods"]) == 7
+        assert len(result["periods"]) == 8
         with pytest.raises(HTTPException) as duplicate:
             await contracts.create_contract(contracts.ContractCreate(code="SH701"), request, "owner")
         assert duplicate.value.status_code == 409

@@ -30,6 +30,7 @@ DEFAULT_PERIOD_CONFIGS: tuple[PeriodConfig, ...] = (
     PeriodConfig(id=None, label="10分钟", duration_seconds=600, m4=240, m3=60, m2=21, m1=4),
     PeriodConfig(id=None, label="5分钟", duration_seconds=300, m4=240, m3=60, m2=21, m1=4),
     PeriodConfig(id=None, label="3分钟", duration_seconds=180, m4=200, m3=100, m2=21, m1=4),
+    PeriodConfig(id=None, label="1分钟", duration_seconds=60, m4=200, m3=100, m2=21, m1=4),
 )
 
 
@@ -160,6 +161,24 @@ class ConfigRepository:
             followup_columns = {row["name"] for row in conn.execute("PRAGMA table_info(followup_alerts)")}
             if "last_triggered_state" not in followup_columns:
                 conn.execute("ALTER TABLE followup_alerts ADD COLUMN last_triggered_state TEXT")
+            one_minute = next(period for period in DEFAULT_PERIOD_CONFIGS if period.duration_seconds == 60)
+            conn.execute(
+                """INSERT INTO period_configs(
+                       contract_id,label,duration_seconds,m4,m3,m2,m1,note
+                   )
+                   SELECT contracts.id, ?, ?, ?, ?, ?, ?, ?
+                   FROM contracts
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM period_configs
+                       WHERE period_configs.contract_id = contracts.id
+                         AND period_configs.duration_seconds = ?
+                   )""",
+                (
+                    one_minute.label, one_minute.duration_seconds, one_minute.m4,
+                    one_minute.m3, one_minute.m2, one_minute.m1, one_minute.note,
+                    one_minute.duration_seconds,
+                ),
+            )
 
     def list_contracts(self, user_id: str) -> list[ContractConfig]:
         with self._connect() as conn:

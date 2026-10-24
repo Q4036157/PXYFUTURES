@@ -79,7 +79,7 @@ def test_updating_contract_symbol_preserves_all_periods(monkeypatch, tmp_path) -
     assert updated is not None
     assert updated.id == contract.id
     assert updated.symbol == "DCE.PP2701"
-    assert len(updated.periods) == 7
+    assert len(updated.periods) == 8
     periods = {period.duration_seconds: period for period in updated.periods}
     assert (periods[86_400].label, periods[86_400].m4, periods[86_400].m3) == ("日线", 180, 60)
     assert (periods[7_200].label, periods[7_200].m4, periods[7_200].m3) == ("2小时", 120, 60)
@@ -104,3 +104,22 @@ def test_new_contract_contains_all_default_periods(monkeypatch, tmp_path) -> Non
         (period.label, period.duration_seconds, period.m4, period.m3, period.m2, period.m1)
         for period in DEFAULT_PERIOD_CONFIGS
     ]
+
+
+def test_existing_contract_gets_one_minute_period_during_schema_initialization(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    repository = ConfigRepository()
+    contract = repository.create_contract("local", "CZCE.SR701", "SR701")
+    repository.delete_period("local", contract.id, 60)
+
+    migrated = ConfigRepository().get_contract("local", contract.id)
+
+    assert migrated is not None
+    one_minute = [period for period in migrated.periods if period.duration_seconds == 60]
+    assert [(period.label, period.m4, period.m3, period.m2, period.m1) for period in one_minute] == [
+        ("1分钟", 200, 100, 21, 4),
+    ]
+    assert len(migrated.periods) == 8
+    reloaded = ConfigRepository().get_contract("local", contract.id)
+    assert reloaded is not None
+    assert len([period for period in reloaded.periods if period.duration_seconds == 60]) == 1

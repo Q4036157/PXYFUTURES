@@ -27,7 +27,7 @@ from app.services.repository import ConfigRepository, ContractConfig, PeriodConf
 router = APIRouter(prefix="/api/contracts", tags=["均线信号"])
 _CHINA_TZ = timezone(timedelta(hours=8))
 logger = logging.getLogger(__name__)
-_SUPPORTED_ALERT_DURATIONS = frozenset({180, 300, 600, 900, 1800, 3600, 7200, 14400, 86400})
+_SUPPORTED_ALERT_DURATIONS = frozenset({60, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 86400})
 _ALERT_STATE_LOOKBACK_BARS = 300
 _MAX_CACHED_BASE_BARS = 50_000
 _signal_requirement_notices: set[tuple[int, str, str]] = set()
@@ -49,7 +49,7 @@ def _log_signal_requirement_once(contract_id: int, symbol: str, error: ValueErro
 
 
 class AlertScanBody(BaseModel):
-    durations: list[int] = Field(default_factory=list, max_length=9)
+    durations: list[int] = Field(default_factory=list, max_length=10)
 
     @field_validator("durations")
     @classmethod

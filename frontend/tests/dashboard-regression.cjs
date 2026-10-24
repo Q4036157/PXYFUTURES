@@ -4,7 +4,9 @@ const assert = require('node:assert/strict')
 const { chromium } = require(process.env.PXY_PLAYWRIGHT_MODULE || 'playwright')
 const dist = process.env.PXY_LAYOUT_DIST || path.resolve(__dirname, '../dist')
 const periods = [300, 600].map((duration_seconds, id) => ({ id: id + 1, label: `${duration_seconds / 60}分钟`, duration_seconds, m4: 240, m3: 60, m2: 21, m1: 4, note: '' }))
-const fixture = [{ id: 1, name: 'AA', sort_order: 0, contracts: ['SR701', 'AP701', 'FG701'].map((code, i) => ({ id: i + 1, symbol: `CZCE.${code}`, exchange: 'CZCE', code, name: code, periods, group_id: 1, sort_order: i })) }, { id: 2, name: 'BB', sort_order: 1, contracts: [] }]
+const oneMinutePeriod = { id: 3, label: '1分钟', duration_seconds: 60, m4: 200, m3: 100, m2: 21, m1: 4, note: '' }
+const fixturePeriods = [...periods, oneMinutePeriod]
+const fixture = [{ id: 1, name: 'AA', sort_order: 0, contracts: ['SR701', 'AP701', 'FG701'].map((code, i) => ({ id: i + 1, symbol: `CZCE.${code}`, exchange: 'CZCE', code, name: code, periods: fixturePeriods, group_id: 1, sort_order: i })) }, { id: 2, name: 'BB', sort_order: 1, contracts: [] }]
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wav': 'audio/wav' }
 const signalBaseTime = Date.now() - 120000
 function signal(minutes = 0, contract = fixture[0].contracts[0], period = periods[0]) {
@@ -153,6 +155,7 @@ async function main() {
   try {
     await page.goto('http://futures-regression.local/futures-app/')
     await page.waitForSelector('.signal-table tbody tr')
+    assert.equal(await page.getByRole('button', { name: '1分钟', exact: true }).count(), 1, '全品种预警必须提供1分钟周期')
     assert.deepEqual(await codes(), ['SR701', 'AP701', 'FG701'])
     assert.equal(await page.getByRole('button', { name: '上移合约', exact: true }).first().isDisabled(), true)
     assert.equal(await page.getByRole('button', { name: '下移合约', exact: true }).last().isDisabled(), true)

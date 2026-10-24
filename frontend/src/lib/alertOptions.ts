@@ -13,6 +13,7 @@ export const commonPeriods = [
   { label: '10分钟', durationSeconds: 600 },
   { label: '5分钟', durationSeconds: 300 },
   { label: '3分钟', durationSeconds: 180 },
+  { label: '1分钟', durationSeconds: 60 },
 ]
 export const alertConditionOptions: AlertCondition[] = [
   '多多金叉', '多空金叉', '空多金叉', '空空金叉',
