@@ -87,8 +87,10 @@ def _apply_alignment_states(
     snapshots: list[dict[str, object]], daily_positions: dict[str, str | None],
 ) -> None:
     for snapshot in snapshots:
+        symbol = snapshot.get("symbol")
         snapshot["alignment_state"] = alignment_state(
-            str(snapshot["label"]), daily_positions.get(str(snapshot["symbol"])),
+            str(snapshot["label"]),
+            daily_positions.get(str(symbol)) if symbol else None,
         )
 
 
@@ -178,6 +180,7 @@ def _snapshot_from_market_bars(
         signal.label,
     )
     return {
+        "symbol": symbol,
         "period": period.__dict__,
         "trend": {"m3": signal.trend_m3, "m4": signal.trend_m4},
         "cross_type": signal.cross_type,

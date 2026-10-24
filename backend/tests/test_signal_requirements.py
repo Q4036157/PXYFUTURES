@@ -42,6 +42,7 @@ def test_snapshot_exposes_cross_and_confirmed_bar_times() -> None:
 
     snapshot = _snapshot(CrossingClient(), object(), "CZCE.SR701", period)
 
+    assert snapshot["symbol"] == "CZCE.SR701"
     assert snapshot["cross_time"] == "1970-01-01T08:00:05+08:00"
     assert snapshot["confirmed_bar_time"] == "1970-01-01T08:00:05+08:00"
     assert snapshot["confirmed_at"] == "1970-01-01T08:00:06+08:00"
@@ -159,6 +160,9 @@ class SingleContractRepository:
 
     def get_contract(self, user_id: str, contract_id: int) -> ContractConfig | None:
         return self.contract if contract_id == self.contract.id else None
+
+    def load_kline_bars(self, _symbol: str, _duration_seconds: int, _count: int) -> list[tuple[int, float]]:
+        return []
 
 
 def test_signal_endpoint_returns_available_periods_and_logs_shortage_once(
