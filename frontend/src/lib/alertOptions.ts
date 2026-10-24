@@ -19,4 +19,4 @@ export const alertConditionOptions: AlertCondition[] = [
   '多多金叉', '多空金叉', '空多金叉', '空空金叉',
   '多多死叉', '多空死叉', '空多死叉', '空空死叉',
 ]
-export const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '下跌', '反弹', '空震荡', '顺空', '顺多', '逆空', '逆多']
+export const alertStateOptions: AlertState[] = ['上涨', '回调', '多震荡', '顺多', '逆空', '下跌', '反弹', '空震荡', '顺空', '逆多']

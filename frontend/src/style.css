@@ -57,6 +57,8 @@ button { font: inherit; }
 .alert-options button:hover { color: #fff; border-color: #79ad9d; transform: translateY(-1px); }
 .alert-options button.active { color: var(--pxy-deep); background: var(--pxy-mint); border-color: var(--pxy-mint); font-weight: 800; }
 .alert-options button.active.death { color: var(--pxy-text); background: var(--pxy-orange); border-color: var(--pxy-orange); }
+.alert-options button.state-divider { position: relative; margin-left: 16px; }
+.alert-options button.state-divider::before { content: ''; position: absolute; top: 3px; bottom: 3px; left: -10px; width: 1px; background: rgb(185 240 220 / 48%); }
 .alert-results { min-height: 320px; max-height: 360px; overflow-y: auto; scrollbar-color: #26718a #0b202b; }
 .alert-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .alert-period-heading { display: flex; align-items: center; gap: 10px; margin: 0; padding: 7px 16px; border-top: 2px solid var(--pxy-orange); color: var(--pxy-mint); background: rgb(185 240 220 / 4%); font-size: 12px; line-height: 1.4; }
