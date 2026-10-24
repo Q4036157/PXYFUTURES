@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_ALERT_DURATIONS = frozenset({60, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 86400})
 _ALERT_STATE_LOOKBACK_BARS = 300
 _MAX_CACHED_BASE_BARS = 50_000
-_BULLISH_STATES = frozenset({"上涨", "回调", "多震荡"})
-_BEARISH_STATES = frozenset({"下跌", "反弹", "空震荡"})
+_BULLISH_STATES = frozenset({"上涨", "反弹", "多震荡"})
+_BEARISH_STATES = frozenset({"下跌", "回调", "空震荡"})
 _signal_requirement_notices: set[tuple[int, str, str]] = set()
 _signal_requirement_notice_lock = Lock()
 

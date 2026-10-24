@@ -83,14 +83,16 @@ def test_one_minute_is_an_accepted_alert_period() -> None:
 
 @pytest.mark.parametrize(("label", "position", "expected"), [
     ("上涨", "above", "顺多"),
-    ("回调", "above", "顺多"),
+    ("反弹", "above", "顺多"),
     ("多震荡", "above", "顺多"),
     ("下跌", "above", "逆空"),
-    ("反弹", "above", "逆空"),
+    ("回调", "above", "逆空"),
     ("空震荡", "above", "逆空"),
     ("上涨", "below", "逆多"),
+    ("反弹", "below", "逆多"),
     ("多震荡", "below", "逆多"),
     ("下跌", "below", "顺空"),
+    ("回调", "below", "顺空"),
     ("空震荡", "below", "顺空"),
     ("上涨", None, None),
 ])
