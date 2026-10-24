@@ -532,6 +532,10 @@ async def get_signals(
         if isinstance(result, BaseException):
             raise result
         signals.append(result)
+    _apply_alignment_states(
+        signals,
+        _daily_positions(repository, [(contract, period) for period in contract.periods]),
+    )
     market_status = client.contract_status(contract.symbol) if isinstance(client, TqClient) else "unknown"
     if market_status == "expired":
         warnings.append("该合约已到期，仅展示历史行情，已退出实时订阅和预警；可使用更换合约按钮切换")

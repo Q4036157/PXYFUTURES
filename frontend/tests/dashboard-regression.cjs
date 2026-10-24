@@ -97,7 +97,7 @@ async function main() {
         moved.group_id = body.group_id
         state.find(group => group.id === body.group_id).contracts.push(moved)
         data = moved
-      } else if (last === 'signals') data = { contract_id: Number(parts.at(-2)), symbol: 'CZCE.SR701', market_status: 'active', signals: periods.map(period => signal(0, fixture[0].contracts[0], period)), warnings: [] }
+      } else if (last === 'signals') data = { contract_id: Number(parts.at(-2)), symbol: 'CZCE.SR701', market_status: 'active', signals: periods.map((period, index) => ({ ...signal(0, fixture[0].contracts[0], period), alignment_state: index === 0 ? '顺多' : '顺空' })), warnings: [] }
       else if (last === 'scan') data = { signals: scanSignals, requested: 6, failed: 0 }
       else if (last === 'suggestions') {
         const query = url.searchParams.get('query')?.toUpperCase()
@@ -155,6 +155,8 @@ async function main() {
   try {
     await page.goto('http://futures-regression.local/futures-app/')
     await page.waitForSelector('.signal-table tbody tr')
+    assert.deepEqual(await page.locator('.signal-table th').allTextContents(), ['周期', '均线4', '均线3', '均线1上穿/下穿均线2', '日线顺逆', '备注'])
+    assert.deepEqual(await page.locator('.signal-alignment-cell').allTextContents(), ['顺多', '顺空'])
     assert.equal(await page.getByRole('button', { name: '1分钟', exact: true }).count(), 1, '全品种预警必须提供1分钟周期')
     const stateButtons = page.locator('.alert-center .alert-control-row.states .alert-options button')
     assert.deepEqual(await stateButtons.allTextContents(), ['上涨', '回调', '多震荡', '顺多', '逆空', '下跌', '反弹', '空震荡', '顺空', '逆多'])
