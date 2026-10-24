@@ -22,7 +22,7 @@ CONDITIONS = frozenset(
     f"{m4}{m3}{cross}" for m4 in ("多", "空") for m3 in ("多", "空")
     for cross in ("金叉", "死叉")
 )
-STATES = frozenset({"上涨", "回调", "多震荡", "下跌", "反弹", "空震荡"})
+STATES = frozenset({"上涨", "回调", "多震荡", "下跌", "反弹", "空震荡", "顺空", "顺多", "逆空", "逆多"})
 
 
 class SourceConflict(ValueError):
@@ -104,7 +104,10 @@ class FollowupAlertService:
         return (
             signal.get("cross_type") is not None
             and (not rule["conditions"] or condition in rule["conditions"])
-            and (not rule["states"] or signal["label"] in rule["states"])
+            and (not rule["states"] or any(
+                state in rule["states"]
+                for state in (signal.get("label"), signal.get("alignment_state"))
+            ))
         )
 
     def create_rule(

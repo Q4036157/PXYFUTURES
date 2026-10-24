@@ -30,8 +30,66 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_ALERT_DURATIONS = frozenset({60, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 86400})
 _ALERT_STATE_LOOKBACK_BARS = 300
 _MAX_CACHED_BASE_BARS = 50_000
+_BULLISH_STATES = frozenset({"上涨", "回调", "多震荡"})
+_BEARISH_STATES = frozenset({"下跌", "反弹", "空震荡"})
 _signal_requirement_notices: set[tuple[int, str, str]] = set()
 _signal_requirement_notice_lock = Lock()
+
+
+def alignment_state(label: str, daily_position: str | None) -> str | None:
+    """按日线收盘价相对日线M4的位置，返回顺逆方向标签。"""
+    if daily_position == "above":
+        if label in _BULLISH_STATES:
+            return "顺多"
+        if label in _BEARISH_STATES:
+            return "逆空"
+    elif daily_position == "below":
+        if label in _BULLISH_STATES:
+            return "逆多"
+        if label in _BEARISH_STATES:
+            return "顺空"
+    return None
+
+
+def _daily_positions(
+    repository: ConfigRepository,
+    jobs: list[tuple[ContractConfig, PeriodConfig]],
+) -> dict[str, str | None]:
+    """读取每个合约最近已收盘日线，比较收盘价与日线M4。"""
+    positions: dict[str, str | None] = {}
+    contracts = {contract.id: contract for contract, _period in jobs}
+    for contract in contracts.values():
+        daily = next((period for period in contract.periods if period.duration_seconds == 86_400), None)
+        if daily is None:
+            positions[contract.symbol] = None
+            continue
+        config = MovingAverageConfig(m4=daily.m4, m3=daily.m3, m2=daily.m2, m1=daily.m1)
+        rows = repository.load_kline_bars(contract.symbol, 86_400, config.required_bars + 2)
+        if len(rows) < config.required_bars:
+            positions[contract.symbol] = None
+            continue
+        confirmed_rows = rows[:-1] if len(rows) > config.required_bars else rows
+        confirmed = [Bar(timestamp_ns=timestamp_ns, close=close) for timestamp_ns, close in confirmed_rows]
+        try:
+            state = calculate_signal(confirmed, config)
+        except ValueError:
+            positions[contract.symbol] = None
+            continue
+        close = confirmed[-1].close
+        m4 = state.ma_values.get("M4")
+        positions[contract.symbol] = "above" if m4 is not None and close > m4 else (
+            "below" if m4 is not None and close < m4 else None
+        )
+    return positions
+
+
+def _apply_alignment_states(
+    snapshots: list[dict[str, object]], daily_positions: dict[str, str | None],
+) -> None:
+    for snapshot in snapshots:
+        snapshot["alignment_state"] = alignment_state(
+            str(snapshot["label"]), daily_positions.get(str(snapshot["symbol"])),
+        )
 
 
 def _log_signal_requirement_once(contract_id: int, symbol: str, error: ValueError) -> None:
@@ -167,6 +225,7 @@ def _scan_cached_alert_jobs(
     replay_since: dict[tuple[int, int], str | None] | None = None,
 ) -> tuple[list[dict[str, object]], int]:
     """按合约和基础周期合并数据库读取，再恢复各预警周期状态。"""
+    daily_positions = _daily_positions(repository, jobs)
     source_counts: dict[tuple[str, int], int] = {}
     for contract, period in jobs:
         base_duration_seconds, base_count = _cached_source_request(period)
@@ -329,6 +388,7 @@ def _scan_cached_alert_jobs(
                 if "closed_at" not in item:
                     continue
                 replayed.append(item)
+        _apply_alignment_states(replayed, daily_positions)
         return replayed, len(last_errors)
 
     snapshots = [
@@ -338,6 +398,7 @@ def _scan_cached_alert_jobs(
         and snapshot["cross_type"] is not None
         and snapshot["state_bar_count"] > 0
     ]
+    _apply_alignment_states(snapshots, daily_positions)
     return snapshots, len(last_errors)
 
 

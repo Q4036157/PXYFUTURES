@@ -25,7 +25,7 @@ class FollowupBody(BaseModel):
     source: FollowupSource
     duration_seconds: int
     conditions: list[str] = Field(default_factory=list, max_length=8)
-    states: list[str] = Field(default_factory=list, max_length=6)
+    states: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("duration_seconds")
     @classmethod

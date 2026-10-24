@@ -342,6 +342,15 @@ def test_choices_are_or_within_category_and_and_across_categories(
     assert service.matches({"conditions": conditions, "states": states}, signal(0, label, cross)) is expected
 
 
+def test_direction_state_is_supported_by_followup_matching(setup_rule):
+    _, _, _, _, service, signal, _ = setup_rule
+    snapshot = signal(0, "下跌")
+    snapshot["alignment_state"] = "顺空"
+
+    assert service.matches({"conditions": [], "states": ["顺空"]}, snapshot) is True
+    assert service.matches({"conditions": [], "states": ["顺多"]}, snapshot) is False
+
+
 def test_duplicate_ignores_option_order_metadata_and_preserves_history(setup_rule):
     repo, contract, snapshots, calls, service, signal, create = setup_rule
     snapshots[:] = [signal(0)]
@@ -676,6 +685,8 @@ def test_api_validation_and_account_boundaries(setup_rule):
         contract_id=contract.id, source=api.FollowupSource(duration_seconds=7200, state="反弹"),
         duration_seconds=1800, states=["下跌"],
     )
+    direction_body = api.FollowupBody(**{**body.model_dump(), "states": ["顺空", "顺多", "逆空", "逆多"]})
+    assert direction_body.states == ["顺空", "顺多", "逆空", "逆多"]
 
     async def run():
         with pytest.raises(HTTPException) as forbidden:

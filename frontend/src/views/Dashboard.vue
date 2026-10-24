@@ -158,9 +158,9 @@ const matchingAlertSignals = computed(() => {
   return alertSignals.value
     .filter((signal) => {
       const condition = alertCondition(signal)
-      const state = alertState(signal)
+      const signalStates = alertStates(signal)
       const matchesCondition = !conditions.size || (condition !== null && conditions.has(condition))
-      const matchesState = !states.size || (state !== null && states.has(state))
+      const matchesState = !states.size || signalStates.some((state) => states.has(state))
       return durations.has(signal.period.duration_seconds) && matchesCondition && matchesState
     })
     .sort((left, right) => {
@@ -203,12 +203,15 @@ function alertCondition(signal: AlertSignalSnapshot): AlertCondition | null {
   return `${signal.trend.m4}${signal.trend.m3}${signal.cross_type}` as AlertCondition
 }
 
-function alertState(signal: AlertSignalSnapshot): AlertState | null {
-  return alertStateOptions.includes(signal.label as AlertState) ? signal.label as AlertState : null
+function alertStates(signal: AlertSignalSnapshot): AlertState[] {
+  return [signal.label, signal.alignment_state || ''].filter(
+    (state): state is AlertState => alertStateOptions.includes(state as AlertState),
+  )
 }
 
 function alertText(signal: AlertSignalSnapshot): string {
-  return `${signal.symbol} · ${signal.period.label} · ${alertCondition(signal)} · ${signal.label}`
+  const alignment = signal.alignment_state ? `（${signal.alignment_state}）` : ''
+  return `${signal.symbol} · ${signal.period.label} · ${alertCondition(signal)} · ${signal.label}${alignment}`
 }
 
 function alertCount(signal: AlertSignalSnapshot): number {
@@ -359,9 +362,9 @@ function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): vo
     Date.parse(left.cross_time ?? '') - Date.parse(right.cross_time ?? ''),
   ).filter((signal) => {
     const condition = alertCondition(signal)
-    const state = alertState(signal)
+    const signalStates = alertStates(signal)
     if (selectedConditions.size && (!condition || !selectedConditions.has(condition))) return false
-    if (selectedStates.size && (!state || !selectedStates.has(state))) return false
+    if (selectedStates.size && !signalStates.some((state) => selectedStates.has(state))) return false
     if (!selectedAlertDurations.value.includes(signal.period.duration_seconds)) return false
     if (signal.state_bar_count !== 1) return false
     if (!signal.cross_time || signal.cross_time !== signal.confirmed_bar_time) return false

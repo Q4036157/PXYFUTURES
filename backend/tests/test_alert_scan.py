@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.api import signals
 from app.services.repository import ContractConfig, PeriodConfig
 
@@ -77,3 +79,22 @@ def test_one_minute_is_an_accepted_alert_period() -> None:
     body = signals.AlertScanBody(durations=[60])
 
     assert body.durations == [60]
+
+
+@pytest.mark.parametrize(("label", "position", "expected"), [
+    ("上涨", "above", "顺多"),
+    ("回调", "above", "顺多"),
+    ("多震荡", "above", "顺多"),
+    ("下跌", "above", "逆空"),
+    ("反弹", "above", "逆空"),
+    ("空震荡", "above", "逆空"),
+    ("上涨", "below", "逆多"),
+    ("多震荡", "below", "逆多"),
+    ("下跌", "below", "顺空"),
+    ("空震荡", "below", "顺空"),
+    ("上涨", None, None),
+])
+def test_daily_m4_alignment_maps_raw_state_to_direction(
+    label: str, position: str | None, expected: str | None,
+) -> None:
+    assert signals.alignment_state(label, position) == expected

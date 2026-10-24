@@ -276,6 +276,12 @@ async function main() {
     await send([next])
     assert.deepEqual(await page.locator('.alert-new-badge').allTextContents(), ['+2'])
     assert.equal(await page.locator('.market-alert-popup').count(), 0)
+    const aligned = { ...next, alignment_state: '顺空', confirmed_bar_time: new Date(Date.parse(next.confirmed_bar_time) + 60000).toISOString(), cross_time: new Date(Date.parse(next.cross_time) + 60000).toISOString() }
+    await send([aligned])
+    assert.ok((await page.locator('.alert-result-text').first().textContent()).includes('（顺空）'))
+    await page.getByRole('button', { name: '顺空', exact: true }).click()
+    assert.ok((await page.locator('.alert-result-text').allTextContents()).every(text => text.includes('（顺空）')))
+    await page.getByRole('button', { name: '顺空', exact: true }).click()
     const countTitle = await page.locator('.alert-new-badge').getAttribute('title')
     assert.ok(countTitle.includes('原始信号K线：') && countTitle.includes('已统计至收盘K线：'))
     assert.ok(countTitle.includes('含信号K线共2根，未收盘不计'))

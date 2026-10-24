@@ -34,6 +34,7 @@ export interface SignalSnapshot {
   cross_type: '金叉' | '死叉' | null
   cross_time: string | null
   label: string
+  alignment_state?: '顺空' | '顺多' | '逆空' | '逆多' | null
   state_since: string | null
   state_bar_count: number
   ma_values: Record<'M1' | 'M2' | 'M3' | 'M4', number>
