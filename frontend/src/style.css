@@ -131,7 +131,6 @@ button { font: inherit; }
 .alert-new-badge { flex: 0 0 auto; margin-left: auto; padding: 2px 7px; color: #fff; background: var(--pxy-orange); border: 1px solid rgb(255 190 161 / 70%); border-radius: 3px; box-shadow: 0 0 10px rgb(255 138 91 / 28%); font-size: 9px; font-weight: 900; letter-spacing: .08em; line-height: 1.3; }
 .signal-pulse { flex: 0 0 auto; width: 6px; height: 6px; background: var(--pxy-orange); border-radius: 50%; box-shadow: 0 0 8px rgb(255 138 91 / 70%); }
 .alert-empty { display: grid; min-height: 320px; place-items: center; color: #75948a; font-size: 13px; }
-.alert-center-footer { display: flex; justify-content: space-between; gap: 20px; min-height: 36px; padding: 10px 16px; color: #6f9186; border-top: 1px solid rgb(185 240 220 / 15%); font-size: 11px; }
 .market-alert-popup { position: fixed; z-index: 5000; top: 88px; right: 24px; width: min(440px, calc(100vw - 32px)); overflow: hidden; color: #eaf4ef; background: rgb(12 41 43 / 98%); border: 1px solid #5c8177; border-radius: 8px; box-shadow: 0 20px 60px rgb(7 30 32 / 42%); backdrop-filter: blur(14px); }
 .market-alert-popup::before, .market-alert-popup::after { content: ''; position: absolute; width: 24px; height: 24px; pointer-events: none; }
 .market-alert-popup::before { top: 7px; left: 7px; border-top: 2px solid var(--pxy-mint); border-left: 2px solid var(--pxy-mint); }
