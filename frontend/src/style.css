@@ -194,3 +194,17 @@ button { font: inherit; }
 .workspace-main .monitor-section { width: 100%; margin: 0; }
 @media (max-width: 960px) { .workspace-layout { width: calc(100% - 28px); } }
 @media (max-width: 720px) { .workspace-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 24px); margin-top: 12px; }.workspace-layout > .contract-groups-panel { position: static; max-height: 360px; }.workspace-main .setup-details-panel .panel-header > div { flex-wrap: wrap; gap: 4px 9px; } }
+.workspace .signal-area.resizable-panel { overflow-x: hidden; overflow-y: auto; }
+.workspace .signal-area .signal-table { width: 100%; min-width: 0; table-layout: fixed; }
+.workspace .signal-area .signal-table th:nth-child(1) { width: 10%; }
+.workspace .signal-area .signal-table th:nth-child(2), .workspace .signal-area .signal-table th:nth-child(3) { width: 9%; }
+.workspace .signal-area .signal-table th:nth-child(4) { width: 28%; }
+.workspace .signal-area .signal-table th:nth-child(5) { width: 14%; }
+.workspace .signal-area .signal-table th:nth-child(6) { width: 30%; }
+.workspace .signal-area .signal-table th, .workspace .signal-area .signal-table td { padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace .signal-area .signal-state-cell { min-width: 0; }
+.workspace .signal-area .signal-state-layout span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace .signal-area .period-note-cell { width: auto; min-width: 0; }
+.workspace .signal-area .period-note-cell .el-input { width: 100%; min-width: 0; }
+.workspace .signal-area .ma-footer { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr) repeat(4, minmax(0, 1fr)); }
+.workspace .signal-area .ma-footer strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
