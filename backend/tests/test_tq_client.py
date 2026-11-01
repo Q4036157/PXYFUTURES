@@ -402,3 +402,17 @@ def test_failed_catalog_query_recovers_without_caching_failure(symbol_api) -> No
         client.list_active_futures("DCE", "V")
     assert not client._active_contract_cache
     assert client.list_active_futures("DCE", "V") == ["DCE.v2609", "DCE.v2610"]
+
+
+def test_request_count_uses_only_two_fixed_lengths_to_avoid_serial_accumulation() -> None:
+    """天勤按 data_length 永久新建序列；请求长度只能是 10 根或完整窗口。"""
+    from time import time_ns
+
+    now = time_ns()
+    lengths = set()
+    for minutes_ago in range(0, 600, 7):
+        state = KlineSyncState(max_requested_bars=1503, last_synced_at_ns=now - minutes_ago * 60 * 1_000_000_000)
+        lengths.add(TqClient._request_count(60, 1503, state))
+    assert lengths == {10, 1503}
+    assert TqClient._request_count(60, 1503, None) == 1503
+    assert TqClient._request_count(60, 5, KlineSyncState(1503, now)) == 5

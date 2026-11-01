@@ -204,3 +204,29 @@ def test_incomplete_metadata_refresh_is_not_published(tmp_path, monkeypatch):
     client.refresh_contract_directory()
     assert directory.needs_refresh()
     assert LocalContractDirectory(directory.path).candidates("CZCE", "SH") == ["CZCE.SH701"]
+
+
+def test_contract_expired_during_connection_is_dropped_not_fatal(tmp_path, monkeypatch):
+    """天勤复用旧列表时，已下市合约按元数据剔除，其余合约照常发布。"""
+    directory = LocalContractDirectory(tmp_path / "contracts.json")
+    client = TqClient(directory)
+
+    def meta(symbol, expired):
+        return {
+            "instrument_id": symbol, "instrument_name": "烧碱", "exchange_id": "CZCE",
+            "product_id": "SH", "delivery_year": 2027.0, "delivery_month": 1.0,
+            "expire_datetime": time() + 86400, "ins_class": "FUTURE", "expired": expired,
+        }
+
+    class Api:
+        def query_quotes(self, **kwargs):
+            return ["CZCE.SH701", "CZCE.SH611"]
+
+        def query_symbol_info(self, symbols):
+            return pd.DataFrame([meta("CZCE.SH701", False), meta("CZCE.SH611", True)])
+
+    monkeypatch.setattr(client, "_get_api", lambda: Api())
+    monkeypatch.setattr(client, "_wait_contract_query", lambda api, query: asyncio.run(query()))
+    client.refresh_contract_directory()
+    assert not directory.needs_refresh()
+    assert directory.get("CZCE.SH701") is not None and directory.get("CZCE.SH611") is None

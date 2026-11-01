@@ -626,11 +626,16 @@ class TqClient:
 
     @staticmethod
     def _request_count(duration_seconds: int, count: int, sync_state: KlineSyncState | None) -> int:
+        """只返回两档长度：短实时窗口或完整窗口。
+
+        天勤按 data_length 区分序列，每个新长度都会永久新建一个序列和图表订阅且无法释放。
+        原先按“距上次同步的缺失根数”动态计算长度，几乎每次都不同，序列随运行时间不断累积。
+        """
         if sync_state is None or sync_state.max_requested_bars < count:
             return count
         elapsed_seconds = max(0, (time_ns() - sync_state.last_synced_at_ns) / 1_000_000_000)
         estimated_missing = ceil(elapsed_seconds / duration_seconds) + 5
-        return min(count, max(10, estimated_missing))
+        return min(count, _LIVE_KLINE_BARS) if estimated_missing <= _LIVE_KLINE_BARS else count
 
     def _cached_result(
         self,
@@ -827,8 +832,12 @@ class TqClient:
                     raise ValueError("活跃合约列表数量异常")
                 result = api.query_symbol_info(symbols)
                 frame = await result if isawaitable(result) else result
-                records = [DirectoryContract.from_metadata(row) for row in frame.to_dict("records")]
-                if {r.symbol.upper() for r in records} != {s.upper() for s in symbols}:
+                rows = frame.to_dict("records")
+                # 天勤同一连接内会复用首次 query_quotes 的结果；连接期间到期的合约仍在列表里，
+                # 但元数据已标记下市。按元数据剔除，不能让一个到期合约拖垮整份目录。
+                expired = {str(row.get("instrument_id", "")).upper() for row in rows if row.get("expired") is True}
+                records = [DirectoryContract.from_metadata(row) for row in rows if row.get("expired") is not True]
+                if {r.symbol.upper() for r in records} != {s.upper() for s in symbols} - expired:
                     raise ValueError("合约目录元数据未完整返回")
                 return records
 
@@ -839,8 +848,8 @@ class TqClient:
             logger.info("本地合约目录已更新: 合约=%d 耗时=%.3f秒", len(records), monotonic() - started)
         except Exception as exc:  # noqa: BLE001
             self._notices.warning(
-                "contract-directory", "合约目录同步未完成，保留上次快照并稍后重试: 阶段=%s 类型=%s",
-                stage, type(exc).__name__,
+                "contract-directory", "合约目录同步未完成，保留上次快照并稍后重试: 阶段=%s 类型=%s 原因=%s",
+                stage, type(exc).__name__, str(exc)[:200] or "-",
             )
         finally:
             self._lock.release()
