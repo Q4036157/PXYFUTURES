@@ -35,13 +35,13 @@ Push-Location (Join-Path $Root "frontend")
 try {
     & $env:ComSpec /d /s /c "npm.cmd test"
     if ($LASTEXITCODE -ne 0) { throw "Frontend tests failed" }
-    & $env:ComSpec /d /s /c "npm.cmd run build -- --mode=desktop --base=/"
+    & $env:ComSpec /d /s /c "npm.cmd run build -- --mode=desktop --base=/ --outDir=../packaging/build/frontend-desktop"
     if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
 } finally {
     Pop-Location
 }
 
-$FrontendDist = Join-Path $Root "frontend\dist"
+$FrontendDist = Join-Path $Build "frontend-desktop"
 $DesktopIndex = Join-Path $FrontendDist "index.html"
 $IndexHtml = Get-Content $DesktopIndex -Raw
 $AssetMatches = [regex]::Matches($IndexHtml, '(?:src|href)="(/assets/[^\"]+)"')

@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_all
 
 root = Path(SPECPATH).parent
 backend = root / "backend"
-frontend_dist = root / "frontend" / "dist"
+frontend_dist = root / "packaging" / "build" / "frontend-desktop"
 
 datas = [(str(frontend_dist), "frontend/dist")]
 binaries = []
