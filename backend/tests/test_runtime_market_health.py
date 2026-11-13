@@ -167,6 +167,24 @@ def test_empty_remote_bars_preserve_cache_and_sync_timestamp(monkeypatch):
     assert cache.saved == 0 and len(result.bars) == 3
 
 
+def test_disconnected_transport_keeps_old_frame_as_cache_without_refreshing_timestamp(monkeypatch):
+    client = TqClient()
+    frame = pd.DataFrame([{"datetime": 3, "close": 102.0}])
+    client._api = SimpleNamespace(
+        get_kline_serial=lambda *_args, **_kwargs: frame,
+        wait_update=lambda **_kwargs: None,
+    )
+    client._live_kline_series[("DCE.V2701", 86400)] = _LiveKlineSeries(frame, 10, 500, 2)
+    client._remember_contract_status("DCE.V2701", "active")
+    client._connection_event("wss://example.test", "disconnected")
+    cache = Cache()
+    monkeypatch.setattr(client, "_should_use_cache_only", lambda: False)
+    result = client.fetch_bars("DCE.V2701", 86400, 3, cache)
+    assert result.source == "cache" and result.updated_at_ns == 123
+    assert cache.saved == 0
+    assert client._collect_bar_rollovers([("DCE.V2701", 86400)], cache, 999) == {}
+
+
 def test_unknown_contract_status_does_not_exclude_market_subscription():
     client = TqClient()
 

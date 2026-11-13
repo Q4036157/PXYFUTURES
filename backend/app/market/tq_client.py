@@ -567,6 +567,8 @@ class TqClient:
         repository: ConfigRepository,
         synced_at_ns: int,
     ) -> dict[tuple[str, int], int]:
+        if self.connection_state()["connection_status"] == "disconnected":
+            return {}
         changed: dict[tuple[str, int], int] = {}
         batches: list[tuple[str, int, list[tuple[int, float]], int]] = []
         for key in active_keys:
@@ -682,6 +684,8 @@ class TqClient:
                 if monotonic() - self._last_live_update_monotonic >= 0.2:
                     self._advance_market(api, 0.25)
                     self._last_live_update_monotonic = monotonic()
+                if self.connection_state()["connection_status"] == "disconnected":
+                    return self._cached_result(symbol, duration_seconds, cached, sync_state)
                 remote_bars = self._remote_bars(frame)
                 if not remote_bars:
                     raise MarketDataUnavailable("天勤未返回有效K线，保留本地历史时间")
