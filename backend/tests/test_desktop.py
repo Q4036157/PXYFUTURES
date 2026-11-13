@@ -40,3 +40,35 @@ def test_existing_instance_reports_its_version(monkeypatch: pytest.MonkeyPatch) 
         31221,
         "2026.09.10.1",
     )
+
+
+def test_busy_existing_instance_does_not_start_second_server(monkeypatch, tmp_path):
+    monkeypatch.setattr(desktop, "_runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(desktop, "_default_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(desktop, "_configure_output", lambda *_args: None)
+    monkeypatch.setattr(desktop, "_acquire_instance_guard", lambda: (123, True))
+    monkeypatch.setattr(desktop, "_find_existing_instance", lambda *_args: None)
+    monkeypatch.setattr(desktop, "_find_available_port", lambda *_args: pytest.fail("不应启动第二实例"))
+    errors, released = [], []
+    monkeypatch.setattr(desktop, "_show_error_dialog", lambda error: errors.append(str(error)))
+    monkeypatch.setattr(desktop, "_release_instance_guard", released.append)
+    # 入口会设置工作目录和运行环境；测试结束须恢复，避免污染其他用例。
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PXYFUTURES_DESKTOP", "0")
+    assert desktop.main() == 1
+    assert "已在后台运行" in errors[0]
+    assert released == [123]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="仅验证Windows进程句柄")
+def test_windows_instance_guard_detects_second_handle():
+    first, _existing = desktop._acquire_instance_guard()
+    try:
+        second, existing = desktop._acquire_instance_guard()
+        try:
+            assert existing
+        finally:
+            desktop._release_instance_guard(second)
+    finally:
+        desktop._release_instance_guard(first)

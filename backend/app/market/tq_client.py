@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from inspect import isawaitable
 from math import ceil
-from threading import Lock
+from threading import Event, Lock
 from time import monotonic, time, time_ns
 from typing import Protocol
 
@@ -40,6 +40,11 @@ _LIVE_KLINE_BARS = 10
 _CONNECTION_NOTICE_INTERVAL_SECONDS = 15 * 60
 _CONTRACT_QUERY_TIMEOUT_SECONDS = 2.0
 _CONTRACT_QUERY_LOCK_TIMEOUT_SECONDS = 0.5
+_KLINE_INITIALIZATION_BATCH = 8
+
+
+class _KlineInitializing(RuntimeError):
+    """订阅已发起，等待后续行情循环完成初始化。"""
 
 
 def _is_explicit_credential_rejection(error: BaseException) -> bool:
@@ -107,9 +112,11 @@ class _TqConnectionNoticeLimiter:
         self,
         interval_seconds: float = _CONNECTION_NOTICE_INTERVAL_SECONDS,
         clock: Callable[[], float] = monotonic,
+        on_state: Callable[[str, str], None] | None = None,
     ) -> None:
         self._interval_seconds = interval_seconds
         self._clock = clock
+        self._on_state = on_state
         self._last_emitted: dict[tuple[str, str], float] = {}
         self._suppressed: dict[tuple[str, str], int] = {}
 
@@ -134,6 +141,8 @@ class _TqConnectionNoticeLimiter:
         match = re.search(r"(wss?://\S+?)(?:\s+的网络连接|\s+重新建立网络连接)", message)
         url = match.group(1) if match else "unknown"
         key = (url, event)
+        if self._on_state is not None:
+            self._on_state(url, event)
         now = self._clock()
         last_emitted = self._last_emitted.get(key)
         if last_emitted is not None and now - last_emitted < self._interval_seconds:
@@ -162,7 +171,13 @@ class TqClient:
             tuple[str, str], tuple[float, tuple[str, ...]]
         ] = OrderedDict()
         self._active_contract_cache_lock = Lock()
-        self._connection_notice_limiter = _TqConnectionNoticeLimiter()
+        self._connection_lock = Lock()
+        self._connection_states: dict[str, str] = {}
+        self._connection_phase = "unknown"
+        self._connection_notice_limiter = _TqConnectionNoticeLimiter(on_state=self._connection_event)
+        self._credentials_restart = Event()
+        self._kline_requests: dict[tuple[str, int, int], object] = {}
+        self._initialization_cursor = 0
         self._live_kline_series: dict[tuple[str, int], _LiveKlineSeries] = {}
         self._credential_error: str | None = None
         self._credential_revision = 0
@@ -178,6 +193,10 @@ class TqClient:
     def credential_revision(self) -> int:
         return self._credential_revision
 
+    @property
+    def credentials_blocked(self) -> bool:
+        return self._credential_error is not None
+
     @staticmethod
     def validate_credentials(username: str, password: str) -> None:
         """只调用天勤认证接口校验凭据，不创建行情任务或记录敏感内容。"""
@@ -191,6 +210,7 @@ class TqClient:
         except Exception as exc:
             if _is_explicit_credential_rejection(exc):
                 raise TqCredentialsInvalid("天勤账号或密码错误，请重新输入") from exc
+            logger.warning("天勤认证请求未完成: 类型=%s", type(exc).__name__)
             raise MarketDataUnavailable(
                 f"天勤认证服务暂时不可用：{_connection_failure_message(exc)}"
             ) from exc
@@ -204,7 +224,45 @@ class TqClient:
         self._connect_retry_after = 0.0
         self._connect_failures = 0
 
+    def request_credentials_change(self) -> None:
+        """网页仅通知行情线程切换连接，不在服务主线程等待行情锁。"""
+        self._credentials_restart.set()
+        self._credential_revision += 1
+        self._set_connection_phase("connecting")
+
+    def _set_connection_phase(self, phase: str) -> None:
+        with self._connection_lock:
+            self._connection_phase = phase
+
+    def _connection_event(self, url: str, event: str) -> None:
+        with self._connection_lock:
+            if url not in self._connection_states and len(self._connection_states) >= 16:
+                self._connection_states.pop(next(iter(self._connection_states)))
+            self._connection_states[url] = event
+
+    def connection_state(self) -> dict[str, str]:
+        """返回当前进程观察到的连接状态，不把历史认证成功当作在线。"""
+        with self._connection_lock:
+            phase = self._connection_phase
+            if "disconnected" in self._connection_states.values():
+                phase = "disconnected"
+        messages = {
+            "unknown": "当前进程尚未建立行情连接",
+            "connecting": "正在建立行情连接，请等待，无需重复保存账号",
+            "initializing": "行情连接已建立，订阅正在分批初始化",
+            "connected": "行情连接已建立，当前订阅已就绪",
+            "disconnected": "行情连接已断开，正在自动重连；历史缓存保留",
+        }
+        return {"connection_status": phase, "connection_message": messages[phase]}
+
     def _get_api(self) -> object:
+        if self._credentials_restart.is_set():
+            self._credentials_restart.clear()
+            self._close_api_locked()
+            self._credential_error = None
+            self._remote_retry_after_monotonic = 0.0
+            self._connect_retry_after = 0.0
+            self._connect_failures = 0
         if self._api is not None:
             return self._api
         if self._credential_error is not None:
@@ -261,8 +319,10 @@ class TqClient:
                         return
                     super()._print(msg, level)
 
+            self._set_connection_phase("connecting")
             self._api = FilteredTqApi(auth=TqAuth(username, password))
-            record_tq_auth_state("valid", "天勤账号认证成功，行情连接已建立", "runtime")
+            self._set_connection_phase("initializing")
+            record_tq_auth_state("valid", "天勤账号认证成功，当前行情状态见连接提示", "runtime")
             logger.info("天勤账号认证成功，行情连接已建立")
             self._connect_failures = 0
             self._connect_retry_after = 0.0
@@ -284,11 +344,50 @@ class TqClient:
             raise MarketDataUnavailable(message) from exc
 
     def _defer_connection(self, message: str) -> None:
+        self._set_connection_phase("disconnected")
         self._connect_failures = min(self._connect_failures + 1, 6)
         delay = min(60.0, 3.0 * 2 ** (self._connect_failures - 1))
         self._connect_retry_after = monotonic() + delay
         self._last_connect_error = message
         self._notices.warning("connection", "%s；%.0f秒后重试", message, delay)
+
+    def _get_kline_frame(self, api: object, symbol: str, duration: int, count: int) -> object:
+        """在行情协程内注册订阅，绕开逐项同步等待首帧的长超时。"""
+        if not callable(getattr(api, "create_task", None)) or not callable(
+            getattr(api, "is_serial_ready", None)
+        ):
+            return api.get_kline_serial(symbol, duration_seconds=duration, data_length=count)
+        key = (symbol, duration, count)
+        task = self._kline_requests.get(key)
+        if task is None:
+            if len(self._kline_requests) >= 4096:
+                raise MarketDataUnavailable("行情订阅数量已达上限，请减少监控合约或周期")
+            async def request_frame():
+                return api.get_kline_serial(symbol, duration_seconds=duration, data_length=count)
+
+            task = api.create_task(request_frame())
+            self._kline_requests[key] = task
+        if not task.done():
+            raise _KlineInitializing
+        try:
+            frame = task.result()
+        except Exception:
+            self._kline_requests.pop(key, None)
+            raise
+        if not api.is_serial_ready(frame):
+            raise _KlineInitializing
+        return frame
+
+    def _advance_market(self, api: object, timeout: float) -> None:
+        """普通断线交由SDK重连；逃逸的后台任务异常重建整个失效连接。"""
+        try:
+            api.wait_update(deadline=time() + timeout)
+        except Exception as exc:
+            logger.warning("行情事件循环异常，释放失效连接后重试: 类型=%s", type(exc).__name__)
+            self._close_api_locked()
+            message = _connection_failure_message(exc)
+            self._defer_connection(message)
+            raise MarketDataUnavailable(message) from exc
 
     def contract_status(self, symbol: str) -> str:
         """仅读取已核实的生命周期状态，不在HTTP或预警快路径请求天勤。"""
@@ -345,9 +444,15 @@ class TqClient:
         """复用天勤内存序列，行情到达后只落库发生切换的基础K线。"""
         with self._lock:
             api = self._get_api()
+            if jobs:
+                offset = self._initialization_cursor % len(jobs)
+                jobs = list(jobs[offset:]) + list(jobs[:offset])
+                self._initialization_cursor += _KLINE_INITIALIZATION_BATCH
             active_keys: list[tuple[str, int]] = []
             initialized = 0
             history_backfills = 0
+            attempted = 0
+            pending = False
             excluded: set[str] = set()
             for job in jobs:
                 if self._contract_expired(api, job.symbol):
@@ -375,14 +480,24 @@ class TqClient:
                     series.cache_count = max(series.cache_count, job.count)
                     continue
 
+                if attempted >= _KLINE_INITIALIZATION_BATCH:
+                    pending = True
+                    continue
+                attempted += 1
+
                 # 冷启动时先用长窗口一次性补齐均线历史，再明确切换到10根的
                 # 实时窗口。天勤会把不同 data_length 当成不同序列；页面增量
                 # 请求也使用10根，后台必须监听同一个短序列才能稳定收到收K。
-                history_frame = api.get_kline_serial(
-                    to_tq_symbol(job.symbol),
-                    duration_seconds=job.duration_seconds,
-                    data_length=history_length,
-                )
+                try:
+                    history_frame = self._get_kline_frame(
+                        api, to_tq_symbol(job.symbol), job.duration_seconds, history_length,
+                    )
+                    live_frame = history_frame if history_length == _LIVE_KLINE_BARS else self._get_kline_frame(
+                        api, to_tq_symbol(job.symbol), job.duration_seconds, _LIVE_KLINE_BARS,
+                    )
+                except _KlineInitializing:
+                    pending = True
+                    continue
                 history_bars = self._remote_bars(history_frame)
                 synced_at_ns = time_ns()
                 if history_bars:
@@ -393,14 +508,8 @@ class TqClient:
                         history_length,
                         synced_at_ns,
                     )
-                live_frame = history_frame
                 live_bars = history_bars
                 if history_length != _LIVE_KLINE_BARS:
-                    live_frame = api.get_kline_serial(
-                        to_tq_symbol(job.symbol),
-                        duration_seconds=job.duration_seconds,
-                        data_length=_LIVE_KLINE_BARS,
-                    )
                     live_bars = self._remote_bars(live_frame)
                     if live_bars:
                         repository.save_kline_bars(
@@ -426,6 +535,7 @@ class TqClient:
                     len(excluded), len(active_keys),
                 )
             active_set = set(active_keys)
+            self._set_connection_phase("initializing" if pending else "connected")
             self._live_kline_series = {
                 key: value for key, value in self._live_kline_series.items() if key in active_set
             }
@@ -443,7 +553,7 @@ class TqClient:
             if changed:
                 return MarketRollover(changed, received_at_ns)
 
-            api.wait_update(deadline=time() + max(0.05, timeout_seconds))
+            self._advance_market(api, max(0.05, timeout_seconds))
             self._last_live_update_monotonic = monotonic()
             received_at_ns = time_ns()
             return MarketRollover(
@@ -460,6 +570,8 @@ class TqClient:
         changed: dict[tuple[str, int], int] = {}
         batches: list[tuple[str, int, list[tuple[int, float]], int]] = []
         for key in active_keys:
+            if key not in self._live_kline_series:
+                continue
             series = self._live_kline_series[key]
             latest_rows = self._remote_bars(series.frame, tail=10)
             if not latest_rows:
@@ -560,13 +672,15 @@ class TqClient:
                     frame = series.frame
                     request_count = series.data_length
                 else:
-                    frame = api.get_kline_serial(
-                        tq_symbol, duration_seconds=duration_seconds, data_length=request_count,
-                    )
+                    try:
+                        frame = self._get_kline_frame(api, tq_symbol, duration_seconds, request_count)
+                    except _KlineInitializing:
+                        self._advance_market(api, 0.25)
+                        frame = self._get_kline_frame(api, tq_symbol, duration_seconds, request_count)
                 # get_kline_serial 会同步等待首批历史 K 线初始化完成。一个监控批次中
                 # 只需推进一次行情循环，避免十合约多周期场景把短等待累积成排队延迟。
                 if monotonic() - self._last_live_update_monotonic >= 0.2:
-                    api.wait_update(deadline=time() + 0.25)
+                    self._advance_market(api, 0.25)
                     self._last_live_update_monotonic = monotonic()
                 remote_bars = self._remote_bars(frame)
                 if not remote_bars:
@@ -593,6 +707,11 @@ class TqClient:
                         )
                 self._notices.recover("kline-fetch", "天勤K线读取已恢复")
                 return MarketBars(self._bars_from_rows(cached), "live", synced_at_ns)
+            except _KlineInitializing:
+                # 未就绪不能伪装实时，也不延长正常订阅的网络失败冷却。
+                if cached:
+                    return self._cached_result(symbol, duration_seconds, cached, sync_state)
+                raise MarketDataUnavailable("行情订阅正在初始化，请稍后重试") from None
             except TqCredentialsInvalid:
                 if cached:
                     return self._cached_result(symbol, duration_seconds, cached, sync_state)
@@ -856,15 +975,21 @@ class TqClient:
 
     def close(self) -> None:
         with self._lock:
-            if self._api is not None:
-                try:
-                    self._api.close()
-                except Exception:
-                    logger.warning("关闭天勤连接失败", exc_info=True)
-                finally:
-                    self._api = None
-            # K线 DataFrame 绑定创建它的 TqApi。连接关闭或凭据切换后继续
-            # 复用这些对象不会再收到行情更新，必须让新连接重新订阅。
-            self._live_kline_series.clear()
-            with self._active_contract_cache_lock:
-                self._active_contract_cache.clear()
+            self._close_api_locked()
+
+    def _close_api_locked(self) -> None:
+        """调用方持有行情锁，确保旧连接和订阅一起释放。"""
+        if self._api is not None:
+            try:
+                self._api.close()
+            except Exception:
+                logger.warning("关闭天勤连接失败", exc_info=True)
+            finally:
+                self._api = None
+        self._kline_requests.clear()
+        self._live_kline_series.clear()
+        with self._active_contract_cache_lock:
+            self._active_contract_cache.clear()
+        with self._connection_lock:
+            self._connection_states.clear()
+            self._connection_phase = "unknown"

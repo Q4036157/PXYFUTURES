@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowDown, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
@@ -8,6 +8,8 @@ import { AlertCounter, alertEventKey, mergeAlertSnapshot } from '@/lib/alertCoun
 import buySoundUrl from '@/assets/Buy.wav?url'
 import sellSoundUrl from '@/assets/Sell.wav?url'
 import { StateAlertSound } from '@/lib/alertSound'
+import { connectionAlertType, credentialRequestFailure } from '@/lib/credentials'
+import type { TqCredentialStatus } from '@/lib/credentials'
 import FollowupAlertPanel from '@/components/FollowupAlertPanel.vue'
 import { alertConditionOptions, alertStateOptions, commonPeriods } from '@/lib/alertOptions'
 import type { AlertCondition, AlertState } from '@/lib/alertOptions'
@@ -56,18 +58,13 @@ let contractStatusTimer: number | undefined
 let alertTimer: number | undefined
 let alertSocketReconnectTimer: number | undefined
 let alertSocketHeartbeatTimer: number | undefined
+let credentialStatusTimer: number | undefined
+let credentialStatusVersion = 0
+let credentialStatusController: RequestController | null = null
 interface RequestController {
   readonly aborted: boolean
   signal?: AbortSignal
   abort: () => void
-}
-
-interface TqCredentialStatus {
-  configured: boolean
-  status: 'unconfigured' | 'unknown' | 'valid' | 'invalid' | 'unavailable'
-  checked_at: string | null
-  message: string
-  source: string
 }
 
 let signalAbortController: RequestController | null = null
@@ -1067,41 +1064,85 @@ async function removePeriod(period: PeriodConfig): Promise<void> {
 
 async function saveCredentials(): Promise<void> {
   if (credentialsSaving.value) return
+  stopCredentialStatusPolling()
+  const windowVersion = credentialStatusVersion
   credentialsSaving.value = true
   try {
     const { data } = await client.put<TqCredentialStatus>(
       '/settings/tq-credentials',
       credentials.value,
+      { timeout: 45_000 },
     )
+    if (!dashboardMounted || !credentialsVisible.value || windowVersion !== credentialStatusVersion) return
     credentialStatus.value = data
     credentials.value = { username: '', password: '' }
     credentialsVisible.value = false
     ElMessage.success('天勤账号已通过真实认证并保存')
-    await refreshSignals(true)
-  } catch (error: any) {
-    const detail = error.response?.data?.detail || '认证失败，请检查网络后重试'
+  } catch (error: unknown) {
+    if (!dashboardMounted || !credentialsVisible.value || windowVersion !== credentialStatusVersion) return
+    const failure = credentialRequestFailure(error)
     credentialStatus.value = {
       configured: credentialStatus.value?.configured ?? false,
-      status: error.response?.status === 422 ? 'invalid' : 'unavailable',
-      checked_at: new Date().toISOString(),
-      message: detail,
+      ...failure,
+      checked_at: null,
       source: 'save_validation',
     }
-    ElMessage.error(detail)
+    if (failure.status === 'unknown') ElMessage.warning(failure.message)
+    else ElMessage.error(failure.message)
+    return
   } finally {
     credentialsSaving.value = false
+  }
+  try {
+    await refreshSignals(true)
+  } catch {
+    ElMessage.warning('天勤账号已保存，行情刷新暂未完成，请稍后查看')
+  }
+}
+
+function stopCredentialStatusPolling(): void {
+  credentialStatusVersion += 1
+  if (credentialStatusTimer) {
+    window.clearInterval(credentialStatusTimer)
+    credentialStatusTimer = undefined
+  }
+  credentialStatusController?.abort()
+  credentialStatusController = null
+}
+
+async function refreshCredentialStatus(windowVersion: number): Promise<void> {
+  if (!credentialsVisible.value || credentialsSaving.value
+    || windowVersion !== credentialStatusVersion || credentialStatusController) return
+  const controller = createRequestController()
+  credentialStatusController = controller
+  try {
+    const { data } = await client.get<TqCredentialStatus>('/settings/tq-credentials', {
+      signal: controller.signal,
+      timeout: 5_000,
+    })
+    if (controller.aborted || !credentialsVisible.value || credentialsSaving.value
+      || windowVersion !== credentialStatusVersion) return
+    credentialStatus.value = data
+  } catch {
+    // 状态读取失败时保留上次结果，保存失败后的未知状态由重新打开窗口确认。
+  } finally {
+    if (credentialStatusController === controller) credentialStatusController = null
   }
 }
 
 async function openCredentials(): Promise<void> {
+  if (credentialsSaving.value) return
+  stopCredentialStatusPolling()
+  const windowVersion = credentialStatusVersion
   credentialsVisible.value = true
-  try {
-    const { data } = await client.get<TqCredentialStatus>('/settings/tq-credentials')
-    credentialStatus.value = data
-  } catch {
-    credentialStatus.value = null
-  }
+  credentialStatus.value = null
+  credentialStatusTimer = window.setInterval(() => void refreshCredentialStatus(windowVersion), 3_000)
+  await refreshCredentialStatus(windowVersion)
 }
+
+watch(credentialsVisible, (visible) => {
+  if (!visible) stopCredentialStatusPolling()
+}, { flush: 'sync' })
 
 function credentialAlertType(): 'success' | 'error' | 'warning' | 'info' {
   if (credentialStatus.value?.status === 'valid') return 'success'
@@ -1137,6 +1178,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   cancelContractSuggestions()
+  stopCredentialStatusPolling()
   dashboardMounted = false
   panelResizeObserver?.disconnect()
   panelResizeObserver = null
@@ -1344,6 +1386,7 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="credentialsVisible" title="天勤账号" width="420px" destroy-on-close>
       <el-alert v-if="credentialStatus" :title="credentialStatus.message" :type="credentialAlertType()" :closable="false" show-icon />
+      <el-alert v-if="credentialStatus?.connection_message" :title="credentialStatus.connection_message" :type="connectionAlertType(credentialStatus.connection_status)" :closable="false" show-icon style="margin-top: 12px" />
       <el-form class="credentials-form" label-position="top" @submit.prevent="saveCredentials"><el-form-item label="用户名"><el-input v-model="credentials.username" autocomplete="username" /></el-form-item><el-form-item label="密码"><el-input v-model="credentials.password" type="password" show-password autocomplete="current-password" /></el-form-item></el-form>
       <template #footer><el-button @click="credentialsVisible = false">取消</el-button><el-button type="primary" :loading="credentialsSaving" @click="saveCredentials">验证并保存</el-button></template>
     </el-dialog>

@@ -181,6 +181,28 @@ def _start_tray(server: Any, port: int) -> Any | None:
     return icon
 
 
+def _acquire_instance_guard() -> tuple[int | None, bool]:
+    """用进程存活句柄保护单实例，健康接口繁忙不能绕过此保护。"""
+    if os.name != "nt":
+        return None, False
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, r"Local\PXYFUTURES.Desktop")
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return handle, ctypes.get_last_error() == 183
+
+
+def _release_instance_guard(handle: int | None) -> None:
+    if handle is not None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle(handle)
+
+
 def main() -> int:
     multiprocessing.freeze_support()
     runtime_dir = _runtime_dir()
@@ -197,7 +219,9 @@ def main() -> int:
     print(f"本地数据：{data_dir}")
     print("=" * 64)
 
+    guard: int | None = None
     try:
+        guard, already_running = _acquire_instance_guard()
         ports = _port_candidates()
         existing = _find_existing_instance(ports)
         if existing is not None:
@@ -211,6 +235,12 @@ def main() -> int:
             print(f"智能期货已经运行，正在打开：http://127.0.0.1:{existing_port}/")
             _open_browser(existing_port)
             return 0
+
+        if already_running:
+            raise RuntimeError(
+                "智能期货已在后台运行，但当前繁忙或正在退出。"
+                "请稍后从托盘打开，或等待退出完成；不要反复启动软件。"
+            )
 
         port = _find_available_port(ports)
         os.environ["PORT"] = str(port)
@@ -246,6 +276,8 @@ def main() -> int:
         traceback.print_exc()
         _show_error_dialog(exc)
         return 1
+    finally:
+        _release_instance_guard(guard)
 
 
 if __name__ == "__main__":

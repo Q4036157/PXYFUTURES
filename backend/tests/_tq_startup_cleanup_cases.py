@@ -8,7 +8,7 @@ import pytest
 from tqsdk import TqApi
 
 from app.config import settings
-from app.market.tq_client import MarketDataUnavailable, TqClient
+from app.market.tq_client import MarketDataUnavailable, TqClient, _KlineInitializing
 
 
 @pytest.fixture
@@ -120,3 +120,39 @@ def test_wait_update_failure_keeps_sdk_cleanup_once(monkeypatch, offline_client)
     assert caught.value.__cause__ is error
     assert closed == [api]
     assert api._loop.is_closed() and all(task.done() for task in tasks)
+
+
+def test_real_sdk_kline_registration_never_enters_synchronous_first_frame_wait(
+    monkeypatch, offline_client,
+):
+    client, _now = offline_client
+
+    def ready(api):
+        api._data["mdhis_more_data"] = False
+        api._account._get_trade_more_data = lambda _data: False
+
+    monkeypatch.setattr(TqApi, "_setup_connection", ready)
+    original_wait = TqApi.wait_update
+    monkeypatch.setattr(TqApi, "wait_update", lambda *_args, **_kwargs: True)
+    api = client._get_api()
+    monkeypatch.setattr(TqApi, "wait_update", original_wait)
+
+    async def offline_serial(*_args):
+        return None
+
+    monkeypatch.setattr(api, "_get_serial_async", offline_serial)
+    try:
+        with pytest.raises(_KlineInitializing):
+            client._get_kline_frame(api, "DCE.v2701", 60, 10)
+        # 协程内调用真实接口时，SDK只注册序列并立即返回，不等网络首帧。
+        api._loop.run_until_complete(asyncio.sleep(0))
+        task = client._kline_requests[("DCE.v2701", 60, 10)]
+        assert task.done()
+        frame = task.result()
+        assert len(frame) == 10
+        assert not api.is_serial_ready(frame)
+        with pytest.raises(_KlineInitializing):
+            client._get_kline_frame(api, "DCE.v2701", 60, 10)
+        assert len(api._requests["klines"]) == 1
+    finally:
+        client.close()

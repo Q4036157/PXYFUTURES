@@ -1,9 +1,98 @@
+import asyncio
 from dataclasses import dataclass
 from time import time_ns
 
-from app.market.tq_client import TqClient
+import pytest
+
+from app.market.tq_client import MarketDataUnavailable, TqClient
 from app.services.market_sync import MarketSyncJob
 from app.services.repository import KlineSyncState
+
+
+class AsyncKlineApi:
+    """慢订阅不会阻塞其他订阅，只有推进循环后才变为就绪。"""
+
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.requests = []
+        self.ready = False
+
+    def create_task(self, coroutine):
+        return self.loop.create_task(coroutine)
+
+    def get_kline_serial(self, symbol, *, duration_seconds, data_length):
+        assert self.loop.is_running(), "注册必须在行情协程内，不能进入同步长等待"
+        self.requests.append((symbol, duration_seconds, data_length))
+        return Frame([Row(100, 10.0), Row(200, 11.0)])
+
+    def is_serial_ready(self, _frame):
+        return self.ready
+
+    def wait_update(self, **_kwargs):
+        self.loop.run_until_complete(asyncio.sleep(0))
+        return False
+
+    def close(self):
+        tasks = asyncio.all_tasks(self.loop)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            self.loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+        self.loop.close()
+
+
+def test_pending_subscriptions_are_batched_and_do_not_starve_later_symbols():
+    api = AsyncKlineApi()
+    client = TqClient()
+    client._api = api
+    repository = Repository()
+    jobs = [MarketSyncJob(f"CZCE.UR7{index:02}", 60, 10) for index in range(20)]
+    try:
+        for batch in range(3):
+            event = client.wait_for_bar_rollovers(jobs, repository, 0.01)
+            assert event.changed_sources == {}
+            assert repository.saved == []
+            assert len(api.requests) <= (batch + 1) * 8
+        assert len(api.requests) == 20
+        assert client.connection_state()["connection_status"] == "initializing"
+        api.ready = True
+        for _ in range(4):
+            client.wait_for_bar_rollovers(jobs, repository, 0.01)
+        assert len(client._live_kline_series) == 20
+        assert len(api.requests) == 20
+        assert client.connection_state()["connection_status"] == "connected"
+    finally:
+        client.close()
+
+
+def test_fatal_market_task_failure_closes_and_defers_instead_of_false_recovery():
+    api = AsyncKlineApi()
+    client = TqClient()
+    client._api = api
+
+    def fail(**_kwargs):
+        raise RuntimeError("离线模拟行情后台任务退出")
+
+    api.wait_update = fail
+    with pytest.raises(MarketDataUnavailable):
+        client.wait_for_bar_rollovers([], Repository(), 0.01)
+    assert api.loop.is_closed()
+    assert client._api is None
+    assert not client._kline_requests
+    assert client._connect_failures == 1
+    assert client.connection_state()["connection_status"] == "disconnected"
+
+
+def test_suppressed_disconnect_notifications_still_update_current_state():
+    client = TqClient()
+    client._set_connection_phase("connected")
+    limiter = client._connection_notice_limiter
+    url = "wss://example.test/market"
+    for _ in range(2):
+        limiter.handle(f"与 {url} 的网络连接断开，请检查客户端及网络是否正常")
+        assert client.connection_state()["connection_status"] == "disconnected"
+        limiter.handle(f"与 {url} 的网络连接已恢复")
+        assert client.connection_state()["connection_status"] == "connected"
 
 
 @dataclass

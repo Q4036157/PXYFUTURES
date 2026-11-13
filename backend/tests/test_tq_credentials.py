@@ -145,7 +145,7 @@ def test_save_persists_only_after_validation_and_resets_connection(
             events.append(("validate", username, password))
 
         @staticmethod
-        def credentials_changed() -> None:
+        def request_credentials_change() -> None:
             events.append("reset")
 
     monkeypatch.setattr(
@@ -169,6 +169,69 @@ def test_save_persists_only_after_validation_and_resets_connection(
         ("save", "user", "secret"),
         "reset",
     ]
+
+
+def test_save_returns_while_market_lock_is_held(monkeypatch, tmp_path):
+    """保存成功只发通知，不能等行情锁或关闭旧连接。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    client = TqClient()
+    monkeypatch.setattr(client, "validate_credentials", lambda *_args: None)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(tq_client=client)))
+
+    async def exercise():
+        with client._lock:
+            result = await asyncio.wait_for(
+                settings_api.save_credentials(
+                    settings_api.TqCredentials(username="new", password="secret"), request, "local",
+                ),
+                timeout=1,
+            )
+        assert result["configured"]
+        assert client._credentials_restart.is_set()
+        assert client.credential_revision == 1
+
+    asyncio.run(exercise())
+
+
+def test_same_credentials_do_not_restart_healthy_market(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    settings_api.save_tq_credentials("same", "secret")
+    client = TqClient()
+    monkeypatch.setattr(client, "validate_credentials", lambda *_args: None)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(tq_client=client)))
+    asyncio.run(settings_api.save_credentials(
+        settings_api.TqCredentials(username="same", password="secret"), request, "local",
+    ))
+    assert not client._credentials_restart.is_set()
+    assert client.credential_revision == 0
+
+
+def test_live_connection_status_overrides_historical_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    record_tq_auth_state("valid", "旧的连接成功提示", "runtime")
+    client = TqClient()
+    client._connection_event("wss://example.test", "disconnected")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(tq_client=client)))
+    result = asyncio.run(settings_api.tq_credentials_status(request, "local"))
+    assert result["status"] == "valid"
+    assert result["connection_status"] == "disconnected"
+    assert "旧的连接成功提示" not in result["message"]
+
+
+def test_deferred_credentials_change_releases_old_api_on_market_thread(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    closed = []
+    client = TqClient()
+    client._api = SimpleNamespace(close=lambda: closed.append(True))
+    client.request_credentials_change()
+    assert closed == []
+    monkeypatch.setattr("app.market.tq_client.get_tq_credentials", lambda: ("", ""))
+    monkeypatch.setattr(settings, "tq_user_name", "")
+    monkeypatch.setattr(settings, "tq_password", "")
+    with pytest.raises(MarketDataUnavailable):
+        client._get_api()
+    assert closed == [True]
+    assert client._api is None
 
 
 def test_runtime_rejection_blocks_retries_until_credentials_change(
