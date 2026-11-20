@@ -12,7 +12,8 @@ const emit = defineEmits<{ toggle: [] }>()
 const rules = ref<FollowupRule[]>([])
 const dialogVisible = ref(false)
 const ruleFormVisible = ref(false)
-const source = ref<AlertSignalSnapshot | null>(null)
+const entrySignal = ref<AlertSignalSnapshot | null>(null)
+const source = ref<SignalSnapshot | null>(null)
 const duration = ref<number | null>(null)
 const previewSignals = ref<SignalSnapshot[]>([])
 const previewLoading = ref(false)
@@ -28,7 +29,7 @@ const review = ref<FollowupRule | null>(null)
 const reviewError = ref('')
 const errorText = ref('')
 const popupItems = ref<FollowupRule[]>([])
-const sourceContract = computed(() => props.contracts.find(c => c.id === source.value?.contract_id))
+const sourceContract = computed(() => props.contracts.find(c => c.id === entrySignal.value?.contract_id))
 const sourcePeriods = computed(() => [...(sourceContract.value?.periods ?? [])]
   .sort((left, right) => right.duration_seconds - left.duration_seconds))
 const targetPeriods = computed(() => sourcePeriods.value.filter(period =>
@@ -128,9 +129,14 @@ function chooseTargetPeriod(value: number): void {
   if (!saving.value && hasPeriod(value)) duration.value = value
 }
 
-function openRuleForm(period: number): void {
-  if (!hasPeriod(period) || saving.value) return
-  duration.value = period
+function openRuleForm(signal: SignalSnapshot | undefined): void {
+  if (!signal?.cross_type || saving.value || sourceContract.value?.symbol !== entrySignal.value?.symbol) return
+  if (source.value?.period.duration_seconds !== signal.period.duration_seconds) {
+    duration.value = null
+    conditions.value = []
+    states.value = []
+  }
+  source.value = signal
   ruleFormVisible.value = true
   unlockSound()
   if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
@@ -144,20 +150,22 @@ function stopPreview(): void {
   previewLoading.value = false
 }
 
-async function loadPreview(fixedSignal: AlertSignalSnapshot): Promise<void> {
+async function loadPreview(clickedAlert: AlertSignalSnapshot): Promise<void> {
   stopPreview()
   const request = typeof AbortController === 'undefined' ? undefined : new AbortController()
   previewRequest = request
-  previewSignals.value = [fixedSignal]
+  previewSignals.value = [clickedAlert]
   previewMessage.value = ''
   previewLoading.value = true
-  const isCurrent = () => dialogVisible.value && source.value === fixedSignal && !request?.signal.aborted
+  const isCurrent = () => dialogVisible.value && entrySignal.value === clickedAlert && !request?.signal.aborted
   try {
-    const { data } = await client.get<ContractSignals>(`/contracts/${fixedSignal.contract_id}/signals`, {
+    const { data } = await client.get<ContractSignals>(`/contracts/${clickedAlert.contract_id}/signals`, {
       signal: request?.signal,
+      params: { confirmed_only: true },
     })
     if (!isCurrent()) return
-    if (data.contract_id !== fixedSignal.contract_id || data.symbol !== fixedSignal.symbol) {
+    if (data.contract_id !== clickedAlert.contract_id || data.symbol !== clickedAlert.symbol) {
+      previewSignals.value = []
       previewMessage.value = '合约已变更，请关闭后重新选择预警结果'
       return
     }
@@ -182,13 +190,14 @@ function unlockSound(): void {
 }
 
 function open(signal: AlertSignalSnapshot): void {
-  source.value = JSON.parse(JSON.stringify(signal)) as AlertSignalSnapshot
+  entrySignal.value = signal
+  source.value = null
   duration.value = null
   conditions.value = []
   states.value = []
   ruleFormVisible.value = false
   dialogVisible.value = true
-  void loadPreview(source.value)
+  void loadPreview(entrySignal.value)
 }
 
 watch(dialogVisible, (visible) => {
@@ -238,14 +247,15 @@ function refresh(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!source.value || sourceContract.value?.symbol !== source.value.symbol
+  const signal = source.value
+  const entry = entrySignal.value
+  if (!signal || !entry || sourceContract.value?.symbol !== entry.symbol
     || !duration.value || !hasPeriod(duration.value) || pendingAction.value) return
   saving.value = true
   try {
     await refreshTask
-    const signal = source.value
     const { data } = await client.post<{ rules: FollowupRule[] }>('/followup-alerts', {
-      contract_id: signal.contract_id,
+      contract_id: entry.contract_id,
       source: { duration_seconds: signal.period.duration_seconds, condition: conditionText(signal), state: signal.label },
       duration_seconds: duration.value,
       conditions: conditions.value,
@@ -318,18 +328,18 @@ defineExpose({ open })
       <p v-if="popupItems.length > 5">另有 {{ popupItems.length - 5 }} 条，请查看条件单</p>
     </aside>
 
-    <el-dialog v-model="dialogVisible" class="followup-dialog" :title="ruleFormVisible ? '设置二级预警' : `${source?.symbol ?? '合约'} · 全周期状态`" width="860px" append-to-body align-center :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close>
+    <el-dialog v-model="dialogVisible" class="followup-dialog" :title="ruleFormVisible ? '设置二级预警' : `${entrySignal?.symbol ?? '合约'} · 全周期状态`" width="860px" append-to-body align-center :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close>
       <template v-if="!ruleFormVisible">
-        <p v-if="source" class="followup-dialog-source">当前预警：{{ source.period.label }} · {{ conditionText(source) }} · {{ source.label }}</p>
+        <p v-if="entrySignal" class="followup-dialog-source">当前预警：{{ entrySignal.period.label }} · {{ conditionText(entrySignal) }} · {{ entrySignal.label }}</p>
         <section class="followup-contract-preview" aria-label="该合约已配置周期的信号">
-          <div class="followup-preview-heading"><strong>合约信号</strong><span>选一个周期进入二级预警设置</span></div>
+          <div class="followup-preview-heading"><strong>各周期收盘状态</strong><span>点击一行，将该行设为二级预警的固定条件</span></div>
           <p v-if="previewLoading || previewMessage" class="followup-preview-status" role="status">{{ previewLoading ? '正在加载各周期信号' : previewMessage }}</p>
           <div class="followup-preview-scroll">
             <table v-if="previewRows.length" class="followup-preview-table">
               <thead><tr><th>周期</th><th>大趋势</th><th>小趋势</th><th>状态</th><th>日线顺逆</th></tr></thead>
               <tbody>
-                <tr v-for="{ period, signal } in previewRows" :key="period.duration_seconds" :class="{ 'preview-period-link': hasPeriod(period.duration_seconds), chosen: duration === period.duration_seconds }" @click="openRuleForm(period.duration_seconds)">
-                  <th scope="row"><button type="button" :disabled="!hasPeriod(period.duration_seconds)" @click.stop="openRuleForm(period.duration_seconds)">{{ period.label }}</button></th>
+                <tr v-for="{ period, signal } in previewRows" :key="period.duration_seconds" :class="{ 'preview-period-link': signal?.cross_type, chosen: source?.period.duration_seconds === period.duration_seconds }" @click="openRuleForm(signal)">
+                  <th scope="row"><button type="button" :disabled="!signal?.cross_type" :title="signal?.cross_type ? '以这一行作为固定条件' : '暂无可用于固定条件的交叉状态'" @click.stop="openRuleForm(signal)">{{ period.label }}</button></th>
                   <td><span v-if="signal" class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span><span v-else>—</span></td>
                   <td><span v-if="signal" class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span><span v-else>—</span></td>
                   <td><div v-if="signal" class="followup-preview-state" :class="{ golden: signal.cross_type === '金叉', death: signal.cross_type === '死叉' }"><span>{{ signal.label }}</span><span>{{ signal.cross_type }}</span></div><span v-else>待行情</span></td>
@@ -342,7 +352,7 @@ defineExpose({ open })
         </section>
       </template>
       <template v-else>
-        <p v-if="source" class="followup-dialog-source">固定条件：{{ source.symbol }} · {{ source.period.label }} · {{ conditionText(source) }} · {{ source.label }}</p>
+        <p v-if="source" class="followup-dialog-source">固定条件：{{ entrySignal?.symbol }} · {{ source.period.label }} · {{ conditionText(source) }} · {{ source.label }}{{ source.alignment_state ? `（${source.alignment_state}）` : '' }}</p>
         <div class="alert-control-row"><strong>二级监控周期</strong><div class="alert-options"><button v-for="period in targetPeriods" :key="period.duration_seconds" type="button" :disabled="saving" :class="{ active: duration === period.duration_seconds }" :aria-pressed="duration === period.duration_seconds" @click="chooseTargetPeriod(period.duration_seconds)">{{ period.label }}</button></div></div>
         <div class="alert-control-row conditions"><strong>预警条件</strong><div class="alert-options"><button v-for="condition in alertConditionOptions" :key="condition" type="button" :disabled="saving" :class="{ active: conditions.includes(condition), death: condition.endsWith('死叉') }" :aria-pressed="conditions.includes(condition)" @click="conditions = toggle(conditions, condition)">{{ condition }}</button></div></div>
         <div class="alert-control-row states"><strong>状态条件</strong><div class="alert-options"><button v-for="state in alertStateOptions" :key="state" type="button" :disabled="saving" :class="{ active: states.includes(state), 'state-divider': state === '下跌' }" :aria-pressed="states.includes(state)" @click="states = toggle(states, state)">{{ state }}</button></div></div>
@@ -351,7 +361,7 @@ defineExpose({ open })
       <template #footer>
         <template v-if="ruleFormVisible">
           <el-button :disabled="saving" @click="ruleFormVisible = false">返回周期状态</el-button>
-          <el-button type="primary" :loading="saving" :disabled="!duration || sourceContract?.symbol !== source?.symbol" @click="save">确定</el-button>
+          <el-button type="primary" :loading="saving" :disabled="!duration || sourceContract?.symbol !== entrySignal?.symbol" @click="save">确定</el-button>
         </template>
         <el-button v-else @click="dialogVisible = false">关闭</el-button>
       </template>

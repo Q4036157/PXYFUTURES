@@ -170,14 +170,14 @@ button { font: inherit; }
 .workspace-layout > .contract-groups-panel { position: sticky; top: 88px; width: 100%; min-width: 0; max-height: calc(100vh - 104px); resize: vertical; }
 .workspace-layout .contract-groups-header { position: sticky; z-index: 1; top: 0; }
 .workspace-layout .contract-groups-header > div { display: block; }
-.workspace-layout.groups-minimized { grid-template-columns: 42px minmax(0, 1fr); }
+.workspace-layout.groups-minimized { grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
 .workspace-layout.groups-minimized > .contract-groups-panel { min-height: 0; resize: none; }
 .group-minimize-button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 3px; }
-.group-rail-button { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; padding: 10px 0; color: var(--pxy-brand); background: transparent; border: 0; cursor: pointer; font-weight: 700; }
-.group-rail-button span { writing-mode: vertical-rl; letter-spacing: .16em; }
+.group-rail-button { display: grid; place-items: center; width: 100%; min-height: 34px; color: var(--pxy-brand); background: transparent; border: 0; cursor: pointer; font-size: 14px; }
 .group-rail-button:hover { background: var(--pxy-surface-muted); }
-.signal-panel-header .signal-contract-search { flex: 1 1 200px; max-width: 260px; min-width: 120px; margin-left: auto; align-items: stretch; }
-.signal-panel-header > .panel-toggle { flex-shrink: 0; }
+.signal-panel-header { justify-content: flex-start; }
+.signal-panel-header .signal-contract-search { flex: 1 1 200px; max-width: 260px; min-width: 120px; align-items: stretch; }
+.signal-panel-header > .panel-toggle { flex-shrink: 0; margin-left: auto; }
 .signal-panel-header .signal-contract-search .el-select__wrapper { width: 100%; }
 .signal-panel-header .signal-contract-search span { color: inherit; font-size: inherit; font-weight: inherit; letter-spacing: normal; }
 .alert-group-picker { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: #b9d5ca; font-size: 12px; white-space: nowrap; }
@@ -228,9 +228,7 @@ button { font: inherit; }
 @media (max-width: 720px) { .workspace-layout { grid-template-columns: minmax(0, 1fr); width: calc(100% - 24px); margin-top: 12px; }.workspace-layout > .contract-groups-panel { position: static; max-height: 360px; }.workspace-main .setup-details-panel .panel-header > div { flex-wrap: wrap; gap: 4px 9px; } }
 @media (max-width: 720px) {
   .workspace-layout.groups-minimized { grid-template-columns: minmax(0, 1fr); gap: 9px; }
-  .workspace-layout.groups-minimized > .contract-groups-panel { width: max-content; }
-  .group-rail-button { flex-direction: row; padding: 7px 10px; }
-  .group-rail-button span { writing-mode: horizontal-tb; }
+  .workspace-layout.groups-minimized > .contract-groups-panel { width: 30px; }
   .signal-panel-header { flex-wrap: wrap; gap: 7px; }
   .signal-panel-header .signal-contract-search { flex-basis: 130px; }
   .alert-header-actions { justify-content: flex-start; margin-left: 0; }

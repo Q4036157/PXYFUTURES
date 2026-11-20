@@ -231,6 +231,7 @@ def _scan_cached_alert_jobs(
     jobs: list[tuple[ContractConfig, PeriodConfig]],
     *,
     replay_since: dict[tuple[int, int], str | None] | None = None,
+    include_unclassified: bool = False,
 ) -> tuple[list[dict[str, object]], int]:
     """按合约和基础周期合并数据库读取，再恢复各预警周期状态。"""
     daily_positions = _daily_positions(repository, jobs)
@@ -401,10 +402,9 @@ def _scan_cached_alert_jobs(
 
     snapshots = [
         snapshot
-        for job_key, snapshot in last_snapshots.items()
+        for snapshot in last_snapshots.values()
         if snapshot["data_status"] == "current"
-        and snapshot["cross_type"] is not None
-        and snapshot["state_bar_count"] > 0
+        and (include_unclassified or (snapshot["cross_type"] is not None and snapshot["state_bar_count"] > 0))
     ]
     _apply_alignment_states(snapshots, daily_positions)
     return snapshots, len(last_errors)
@@ -505,7 +505,8 @@ async def stream_alerts(websocket: WebSocket) -> None:
 
 @router.get("/{contract_id}/signals")
 async def get_signals(
-    contract_id: int, request: Request, user_id: str = Depends(current_user_id)
+    contract_id: int, request: Request, user_id: str = Depends(current_user_id),
+    *, confirmed_only: bool = False,
 ) -> dict[str, object]:
     repository: ConfigRepository = request.app.state.config_repository
     contract = repository.get_contract(user_id, contract_id)
@@ -519,6 +520,25 @@ async def get_signals(
             "warnings": [],
         }
     client: TqClient = request.app.state.tq_client
+    if confirmed_only:
+        # 固定条件和后续对比都以已收盘状态为准，预览不发起天勤请求。
+        market_status = client.contract_status(contract.symbol) if isinstance(client, TqClient) else "unknown"
+        if market_status == "expired":
+            snapshots = []
+            warnings = ["该合约已到期，无法设置实时预警"]
+        else:
+            snapshots, _failed = await asyncio.to_thread(
+                _scan_cached_alert_jobs, repository, [(contract, period) for period in contract.periods],
+                include_unclassified=True,
+            )
+            warnings = ["部分配置周期暂无可用的收盘状态"] if len(snapshots) < len(contract.periods) else []
+        return {
+            "contract_id": contract.id,
+            "symbol": contract.symbol,
+            "signals": snapshots,
+            "warnings": warnings,
+            "market_status": market_status,
+        }
     period_results = await asyncio.gather(
         *(
             asyncio.to_thread(_snapshot, client, repository, contract.symbol, period)

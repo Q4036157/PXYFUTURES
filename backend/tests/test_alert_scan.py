@@ -103,6 +103,30 @@ def test_alert_scan_limits_calculation_to_the_selected_user_group(monkeypatch, g
     assert result == {"signals": [{"contract_id": item} for item in expected], "requested": len(expected), "failed": 0}
 
 
+def test_confirmed_contract_preview_uses_all_configured_periods_without_live_market(monkeypatch):
+    periods = [_period(86_400, "日线"), _period(14_400, "4小时"), _period(600, "10分钟")]
+    contract = ContractConfig(7, "CZCE.CF705", "棉花", periods)
+
+    def get_contract(user_id, contract_id):
+        assert (user_id, contract_id) == ("current-user", contract.id)
+        return contract
+
+    def scan(_repository, jobs, *, include_unclassified):
+        assert include_unclassified
+        assert jobs == [(contract, period) for period in periods]
+        return [{"period": periods[1].__dict__, "cross_type": "金叉", "label": "反弹"}], 2
+
+    repository = SimpleNamespace(get_contract=get_contract)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        config_repository=repository, tq_client=object(),
+    )))
+    monkeypatch.setattr(signals, "_scan_cached_alert_jobs", scan)
+    result = asyncio.run(signals.get_signals(7, request, "current-user", confirmed_only=True))
+    assert result["symbol"] == "CZCE.CF705"
+    assert result["signals"] == [{"period": periods[1].__dict__, "cross_type": "金叉", "label": "反弹"}]
+    assert result["warnings"] == ["部分配置周期暂无可用的收盘状态"]
+
+
 @pytest.mark.parametrize(("label", "position", "expected"), [
     ("上涨", "above", "顺多"),
     ("反弹", "above", "顺多"),

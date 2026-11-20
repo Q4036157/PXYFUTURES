@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Search, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
@@ -576,7 +576,11 @@ function displayContractCode(code: string): string {
 function contractSearchLabel(contract: ContractConfig): string {
   const code = displayContractCode(contract.code)
   const name = contract.name.trim()
-  return name && name.toUpperCase() !== code ? `${code} · ${name}` : code
+  return [
+    contract.symbol,
+    code !== contract.code ? code : '',
+    name && ![code, contract.code, contract.symbol].includes(name.toUpperCase()) ? name : '',
+  ].filter(Boolean).join(' · ')
 }
 
 function syncPeriodNotes(items: SignalSnapshot[]): void {
@@ -1277,7 +1281,7 @@ onBeforeUnmount(() => {
     <div class="workspace-layout" :class="{ 'groups-minimized': collapsedPanels.groups }">
       <aside ref="groupsPanelRef" class="contract-groups-panel resizable-panel" :class="{ collapsed: collapsedPanels.groups }" :style="panelStyle('groups')" aria-label="交易合约列表">
         <button v-if="collapsedPanels.groups" type="button" class="group-rail-button" aria-label="展开交易合约栏" aria-expanded="false" title="展开交易合约栏" @click="togglePanel('groups')">
-          <el-icon><ArrowRight /></el-icon><span>交易合约</span>
+          <el-icon><ArrowRight /></el-icon>
         </button>
         <header v-else class="panel-header contract-groups-header">
           <div><h2>交易合约</h2><span>WATCHLIST · 拖动调整顺序</span></div>
@@ -1370,6 +1374,7 @@ onBeforeUnmount(() => {
             aria-label="搜索已添加的合约" placeholder="搜索合约代码或名称" no-match-text="没有匹配的已添加合约"
             no-data-text="尚未添加合约" @change="selectContract"
           >
+            <template #prefix><el-icon><Search /></el-icon></template>
             <el-option v-for="contract in contracts" :key="contract.id" :value="contract.id" :label="contractSearchLabel(contract)" />
           </el-select>
           <button type="button" class="panel-toggle" @click="togglePanel('signals')">{{ collapsedPanels.signals ? '展开' : '折叠' }}</button>
