@@ -1,4 +1,6 @@
 export type AlertSoundKind = 'buy' | 'sell'
+type AlertSoundScope = 'primary' | 'followup'
+type QueuedSound = { kind: AlertSoundKind; scope: AlertSoundScope }
 
 export function alertSoundKinds(states: readonly (string | null | undefined)[]): AlertSoundKind[] {
   const kinds: AlertSoundKind[] = []
@@ -15,7 +17,8 @@ export class StateAlertSound {
   private onBlocked: () => void
   private createAudio: (url: string) => HTMLAudioElement
   private players = new Map<AlertSoundKind, HTMLAudioElement>()
-  private queue: AlertSoundKind[] = []
+  private queue: QueuedSound[] = []
+  private current: QueuedSound | null = null
   private unlockTask: Promise<void> | null = null
   private unlocked = false
   private running = false
@@ -59,10 +62,18 @@ export class StateAlertSound {
     }).finally(() => { this.unlockTask = null })
   }
 
-  playStates(states: readonly (string | null | undefined)[]): void {
+  playStates(states: readonly (string | null | undefined)[], scope: AlertSoundScope = 'followup'): void {
     if (this.disposed) return
-    this.queue.push(...alertSoundKinds(states))
+    this.queue.push(...alertSoundKinds(states).map(kind => ({ kind, scope })))
     void this.drain()
+  }
+
+  stop(scope: AlertSoundScope): void {
+    this.queue = this.queue.filter(item => item.scope !== scope)
+    if (this.current?.scope === scope) {
+      this.current = null
+      this.cancelCurrent?.()
+    }
   }
 
   private async drain(): Promise<void> {
@@ -71,14 +82,19 @@ export class StateAlertSound {
     try {
       await this.unlockTask
       while (this.queue.length && !this.disposed) {
-        const audio = this.player(this.queue.shift()!)
+        const sound = this.queue.shift()!
+        this.current = sound
+        const audio = this.player(sound.kind)
         // 等待整段音频结束后再重复，不按固定间隔截断文件。
-        for (let count = 0; count < 5 && !this.disposed; count += 1) await this.playOnce(audio)
+        for (let count = 0; count < 5 && !this.disposed && this.current === sound; count += 1) {
+          await this.playOnce(audio)
+        }
       }
     } catch {
       this.queue = []
       if (!this.disposed) this.onBlocked()
     } finally {
+      this.current = null
       this.running = false
     }
   }

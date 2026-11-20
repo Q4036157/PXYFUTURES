@@ -63,6 +63,8 @@ export interface AlertScanResult {
 export interface AlertStreamSnapshot extends AlertScanResult {
   type: 'snapshot'
   trigger: 'initial' | 'bar_closed'
+  group_id: number | null
+  selection_version: number | null
   source_received_at?: string
   server_sent_at: string
 }

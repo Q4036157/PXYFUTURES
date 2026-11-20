@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 _CHINA_TZ = timezone(timedelta(hours=8))
 _ROLLOVER_COALESCE_SECONDS = 0.15
 
-AlertScanner = Callable[[ConfigRepository, str, frozenset[int]], dict[str, object]]
+AlertScanner = Callable[[ConfigRepository, str, frozenset[int], int | None], dict[str, object]]
 
 
 @dataclass
@@ -23,6 +23,9 @@ class AlertSubscriber:
     id: str
     user_id: str
     durations: frozenset[int] = field(default_factory=frozenset)
+    group_id: int | None = None
+    selection_version: int | None = None
+    revision: int = 0
     queue: asyncio.Queue[dict[str, object]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=1)
     )
@@ -55,17 +58,27 @@ class AlertStreamService:
                 len(self._subscribers),
             )
 
-    async def update(self, subscriber_id: str, durations: frozenset[int]) -> None:
+    async def update(
+        self, subscriber_id: str, durations: frozenset[int],
+        group_id: int | None = None, selection_version: int | None = None,
+    ) -> None:
         subscriber = self._subscribers.get(subscriber_id)
         if subscriber is None:
             return
         subscriber.durations = durations
+        subscriber.group_id = group_id
+        subscriber.selection_version = selection_version
+        subscriber.revision += 1
+        revision = subscriber.revision
         payload = await asyncio.to_thread(
             self._scanner,
             self._repository,
             subscriber.user_id,
             durations,
+            group_id,
         )
+        if self._subscribers.get(subscriber_id) is not subscriber or subscriber.revision != revision:
+            return
         logger.info(
             "预警订阅已更新: user=%s periods=%s requested=%s signals=%s failed=%s",
             subscriber.user_id,
@@ -74,7 +87,7 @@ class AlertStreamService:
             len(payload.get("signals", [])),
             payload.get("failed", 0),
         )
-        self._offer(subscriber, self._message(payload, "initial", None))
+        self._offer_snapshot(subscriber, self._message(payload, "initial", None))
 
     def offer_control(self, subscriber_id: str, event_type: str) -> None:
         subscriber = self._subscribers.get(subscriber_id)
@@ -122,13 +135,13 @@ class AlertStreamService:
         self._pending_sources.clear()
         self._pending_received_at_ns = 0
 
-        groups: dict[tuple[str, frozenset[int]], list[str]] = {}
+        groups: dict[tuple[str, frozenset[int], int | None], list[tuple[str, int]]] = {}
         for subscriber in self._subscribers.values():
             if subscriber.durations:
                 groups.setdefault(
-                    (subscriber.user_id, subscriber.durations),
+                    (subscriber.user_id, subscriber.durations, subscriber.group_id),
                     [],
-                ).append(subscriber.id)
+                ).append((subscriber.id, subscriber.revision))
         if not groups:
             return
 
@@ -140,8 +153,9 @@ class AlertStreamService:
                     self._repository,
                     user_id,
                     durations,
+                    group_id,
                 )
-                for user_id, durations in keys
+                for user_id, durations, group_id in keys
             ),
             return_exceptions=True,
         )
@@ -154,10 +168,10 @@ class AlertStreamService:
                 )
                 continue
             message = self._message(result, "bar_closed", received_at_ns)
-            for subscriber_id in groups[key]:
+            for subscriber_id, revision in groups[key]:
                 subscriber = self._subscribers.get(subscriber_id)
-                if subscriber is not None and subscriber.durations == key[1]:
-                    self._offer(subscriber, message)
+                if subscriber is not None and subscriber.revision == revision:
+                    self._offer_snapshot(subscriber, message)
         logger.info(
             "收盘预警已推送: 基础序列=%d 用户组合=%d",
             len(changed_sources),
@@ -191,3 +205,10 @@ class AlertStreamService:
             except asyncio.QueueEmpty:
                 pass
         subscriber.queue.put_nowait(message)
+
+    def _offer_snapshot(self, subscriber: AlertSubscriber, message: dict[str, object]) -> None:
+        self._offer(subscriber, {
+            **message,
+            "group_id": subscriber.group_id,
+            "selection_version": subscriber.selection_version,
+        })

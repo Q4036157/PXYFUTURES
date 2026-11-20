@@ -15,24 +15,28 @@ from app.services.market_sync import MarketSyncEvent
 
 
 def test_rollovers_are_coalesced_and_scanned_once_per_user_selection() -> None:
-    calls: list[tuple[str, frozenset[int]]] = []
+    calls: list[tuple[str, frozenset[int], int | None]] = []
 
     def scanner(
         _repository: object,
         user_id: str,
         durations: frozenset[int],
+        group_id: int | None,
     ) -> dict[str, object]:
-        calls.append((user_id, durations))
+        calls.append((user_id, durations, group_id))
         return {"signals": [], "requested": 1, "failed": 0}
 
     async def run() -> None:
         service = AlertStreamService(object(), scanner)  # type: ignore[arg-type]
         first = service.register("user-1")
         second = service.register("user-1")
-        await service.update(first.id, frozenset({180}))
-        await service.update(second.id, frozenset({180}))
+        third = service.register("user-1")
+        await service.update(first.id, frozenset({180}), 2, 5)
+        await service.update(second.id, frozenset({180}), 2, 7)
+        await service.update(third.id, frozenset({180}), 3, 5)
         assert (await first.queue.get())["trigger"] == "initial"
         assert (await second.queue.get())["trigger"] == "initial"
+        assert (await third.queue.get())["trigger"] == "initial"
         calls.clear()
 
         await service.publish_rollovers(
@@ -41,15 +45,20 @@ def test_rollovers_are_coalesced_and_scanned_once_per_user_selection() -> None:
         await service.publish_rollovers(
             MarketSyncEvent({("DCE.PP2701", 60): 101}, 201)
         )
-        first_message, second_message = await asyncio.gather(
+        first_message, second_message, third_message = await asyncio.gather(
             first.queue.get(),
             second.queue.get(),
+            third.queue.get(),
         )
 
         assert first_message["trigger"] == "bar_closed"
         assert second_message["trigger"] == "bar_closed"
         assert first_message["source_received_at"] == second_message["source_received_at"]
-        assert calls == [("user-1", frozenset({180}))]
+        assert (first_message["group_id"], first_message["selection_version"]) == (2, 5)
+        assert (second_message["group_id"], second_message["selection_version"]) == (2, 7)
+        assert (third_message["group_id"], third_message["selection_version"]) == (3, 5)
+        assert set(calls) == {("user-1", frozenset({180}), 2), ("user-1", frozenset({180}), 3)}
+        assert len(calls) == 2
         await service.close()
 
     asyncio.run(run())
@@ -68,14 +77,15 @@ def test_websocket_authenticates_cookie_and_sends_initial_snapshot(monkeypatch) 
         secret,
         algorithm="HS256",
     )
-    calls: list[tuple[str, frozenset[int]]] = []
+    calls: list[tuple[str, frozenset[int], int | None]] = []
 
     def scanner(
         _repository: object,
         user_id: str,
         durations: frozenset[int],
+        group_id: int | None,
     ) -> dict[str, object]:
-        calls.append((user_id, durations))
+        calls.append((user_id, durations, group_id))
         return {"signals": [], "requested": 1, "failed": 0}
 
     async def run() -> None:
@@ -110,7 +120,9 @@ def test_websocket_authenticates_cookie_and_sends_initial_snapshot(monkeypatch) 
         await incoming.put(
             {
                 "type": "websocket.receive",
-                "text": json.dumps({"type": "subscribe", "durations": [180, 300]}),
+                "text": json.dumps({
+                    "type": "subscribe", "durations": [180, 300], "group_id": 8, "selection_version": 2,
+                }),
             }
         )
         for _ in range(100):
@@ -120,7 +132,8 @@ def test_websocket_authenticates_cookie_and_sends_initial_snapshot(monkeypatch) 
         message = json.loads(str(sent[2]["text"]))
         assert message["type"] == "snapshot"
         assert message["trigger"] == "initial"
-        assert calls == [("user-42", frozenset({180, 300}))]
+        assert (message["group_id"], message["selection_version"]) == (8, 2)
+        assert calls == [("user-42", frozenset({180, 300}), 8)]
 
         await incoming.put({"type": "websocket.disconnect", "code": 1000})
         await asyncio.wait_for(task, timeout=1)
@@ -164,6 +177,7 @@ def test_desktop_websocket_accepts_loopback_without_cookie(monkeypatch) -> None:
         _repository: object,
         user_id: str,
         durations: frozenset[int],
+        _group_id: int | None,
     ) -> dict[str, object]:
         calls.append((user_id, durations))
         return {"signals": [], "requested": 1, "failed": 0}
@@ -267,6 +281,7 @@ def test_rollover_arriving_during_scan_is_flushed_next() -> None:
         _repository: object,
         _user_id: str,
         _durations: frozenset[int],
+        _group_id: int | None,
     ) -> dict[str, object]:
         nonlocal calls
         calls += 1

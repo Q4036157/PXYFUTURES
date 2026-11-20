@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowDown, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Back, Close, Delete, EditPen, Plus, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertWebSocketUrl, client } from '@/api/client'
 import { recognizeContract } from '@/lib/contractCatalog'
@@ -76,6 +76,12 @@ const noteSaveTimers = new Map<string, number>()
 const selectedAlertDurations = ref<number[]>([])
 const selectedAlertConditions = ref<AlertCondition[]>([])
 const selectedAlertStates = ref<AlertState[]>([])
+const selectedAlertGroupId = ref<number | null>(null)
+const alertGroupContracts = computed(() => new Map(
+  contracts.value
+    .filter(contract => selectedAlertGroupId.value === null || contract.group_id === selectedAlertGroupId.value)
+    .map(contract => [contract.id, contract.symbol]),
+))
 const alertSignals = ref<AlertSignalSnapshot[]>([])
 const alertScanning = ref(false)
 const alertScanError = ref('')
@@ -84,6 +90,7 @@ const alertExcludedCount = ref(0)
 const alertPopupSignals = ref<AlertSignalSnapshot[]>([])
 const alertPopupVisible = ref(false)
 const alertPopupBeijingTime = ref('')
+let primaryBrowserNotification: Notification | null = null
 const contractOrderSaving = ref(false)
 let contractLoadVersion = 0
 const alertStreamConnected = ref(false)
@@ -100,6 +107,7 @@ const SIGNAL_WARNING_RETRY_MS = 15 * 60 * 1_000
 const ALERT_FRESHNESS_MS = 3 * 60 * 1_000
 const ALERT_SAFETY_SCAN_MS = 5_000
 let alertRescanPending = false
+let alertSelectionVersion = 0
 let alertSocket: WebSocket | null = null
 let alertSocketReconnectDelay = 1_000
 let dashboardMounted = false
@@ -154,6 +162,7 @@ const matchingAlertSignals = computed(() => {
   const states = new Set(selectedAlertStates.value)
   return alertSignals.value
     .filter((signal) => {
+      if (!matchesAlertGroup(signal)) return false
       const condition = alertCondition(signal)
       const signalStates = alertStates(signal)
       const matchesCondition = !conditions.size || (condition !== null && conditions.has(condition))
@@ -171,6 +180,10 @@ const matchingAlertSignals = computed(() => {
       return left.symbol.localeCompare(right.symbol)
     })
 })
+
+function matchesAlertGroup(signal: AlertSignalSnapshot): boolean {
+  return alertGroupContracts.value.get(signal.contract_id) === signal.symbol
+}
 
 const alertPeriodGroups = computed(() => commonPeriods
   .filter((period) => selectedAlertDurations.value.includes(period.durationSeconds))
@@ -240,6 +253,7 @@ function persistAlertPreferences(): void {
       durations: selectedAlertDurations.value,
       conditions: selectedAlertConditions.value,
       states: selectedAlertStates.value,
+      groupId: selectedAlertGroupId.value,
     }))
   } catch {
     // 无法持久化时，当前页面的监测设置仍然有效。
@@ -259,9 +273,27 @@ function loadAlertPreferences(): void {
     if (Array.isArray(saved.states)) selectedAlertStates.value = [...new Set<AlertState>(
       saved.states.filter((value: AlertState) => alertStateOptions.includes(value)),
     )]
+    if (Number.isSafeInteger(saved.groupId) && saved.groupId > 0) selectedAlertGroupId.value = saved.groupId
   } catch {
     // 未保存、损坏或禁用存储时保持未开启，不擅自改变用户预警选择。
   }
+}
+
+function changeAlertGroup(groupId: number | null): void {
+  if (groupId === selectedAlertGroupId.value) return
+  selectedAlertGroupId.value = groupId
+  alertSelectionVersion += 1
+  alertSignals.value = []
+  alertFailedCount.value = 0
+  alertExcludedCount.value = 0
+  alertScanError.value = ''
+  alertSound.stop('primary')
+  closeAlertPopup()
+  primaryBrowserNotification?.close()
+  primaryBrowserNotification = null
+  persistAlertPreferences()
+  syncAlertSubscription()
+  if (!alertStreamConnected.value) void refreshAlertSignals()
 }
 
 function enableAllAlertPeriods(): void {
@@ -330,7 +362,7 @@ function closeAlertPopup(): void {
 function showAlertNotification(items: AlertSignalSnapshot[]): void {
   const beijingTime = currentBeijingTime()
   alertPopupBeijingTime.value = beijingTime
-  alertSound.playStates(items.map(item => item.label))
+  alertSound.playStates(items.map(item => item.label), 'primary')
   if (!document.hidden) {
     alertPopupSignals.value = items
     alertPopupVisible.value = true
@@ -340,7 +372,8 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
   if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
     const preview = items.slice(0, 5).map(alertText).join('\n')
     const more = items.length > 5 ? `\n另有 ${items.length - 5} 条信号` : ''
-    new Notification(`智能期货预警 · ${items.length}条新信号`, {
+    primaryBrowserNotification?.close()
+    primaryBrowserNotification = new Notification(`智能期货预警 · ${items.length}条新信号`, {
       body: `${beijingTime}\n${preview}${more}`,
       tag: 'pxy-futures-alert',
     })
@@ -348,7 +381,7 @@ function showAlertNotification(items: AlertSignalSnapshot[]): void {
 }
 
 function applyAlertSnapshot(data: AlertScanResult, allowNotification = true): void {
-  alertSignals.value = mergeAlertSnapshot(alertSignals.value, data.signals)
+  alertSignals.value = mergeAlertSnapshot(alertSignals.value, data.signals.filter(matchesAlertGroup))
   alertFailedCount.value = data.failed
   alertExcludedCount.value = data.excluded_contracts ?? 0
   if (!allowNotification) return
@@ -387,16 +420,20 @@ async function refreshAlertSignals(allowNotification = true): Promise<void> {
 
   alertScanning.value = true
   alertScanError.value = ''
+  const selectionVersion = alertSelectionVersion
   try {
     const { data } = await client.post<AlertScanResult>('/contracts/alerts/scan', {
       durations: selectedAlertDurations.value,
+      group_id: selectedAlertGroupId.value,
     })
-    applyAlertSnapshot(data, allowNotification)
+    if (dashboardMounted && selectionVersion === alertSelectionVersion) applyAlertSnapshot(data, allowNotification)
   } catch (error: any) {
-    alertScanError.value = error.response?.data?.detail || '预警扫描暂时不可用'
+    if (dashboardMounted && selectionVersion === alertSelectionVersion) {
+      alertScanError.value = error.response?.data?.detail || '预警扫描暂时不可用'
+    }
   } finally {
     alertScanning.value = false
-    if (alertRescanPending) {
+    if (dashboardMounted && alertRescanPending) {
       alertRescanPending = false
       void refreshAlertSignals(allowNotification)
     }
@@ -412,6 +449,8 @@ function syncAlertSubscription(): void {
   alertSocket.send(JSON.stringify({
     type: 'subscribe',
     durations: monitoredAlertDurations(),
+    group_id: selectedAlertGroupId.value,
+    selection_version: alertSelectionVersion,
   }))
 }
 
@@ -459,10 +498,11 @@ function connectAlertStream(): void {
     try {
       const message = JSON.parse(String(event.data)) as AlertStreamSnapshot | { type: string }
       if (message.type === 'snapshot') {
-        applyAlertSnapshot(message as AlertStreamSnapshot)
-        alertScanning.value = false
+        const snapshot = message as AlertStreamSnapshot
+        if (snapshot.selection_version !== alertSelectionVersion || snapshot.group_id !== selectedAlertGroupId.value) return
+        applyAlertSnapshot(snapshot)
       } else if (message.type === 'invalid_subscription') {
-        alertScanError.value = '预警周期配置无效'
+        alertScanError.value = '预警周期或分组配置无效'
       }
     } catch {
       alertScanError.value = '实时预警消息解析失败'
@@ -531,6 +571,12 @@ function dataStatusText(signal: SignalSnapshot): string {
 
 function displayContractCode(code: string): string {
   return /^V\d/.test(code) ? `PVC${code.slice(1)}` : code
+}
+
+function contractSearchLabel(contract: ContractConfig): string {
+  const code = displayContractCode(contract.code)
+  const name = contract.name.trim()
+  return name && name.toUpperCase() !== code ? `${code} · ${name}` : code
 }
 
 function syncPeriodNotes(items: SignalSnapshot[]): void {
@@ -689,6 +735,9 @@ async function loadContracts(allowDuringOrderSave = false): Promise<void> {
   alertCounter.retain(new Set(contracts.value.map((contract) => JSON.stringify([contract.id, contract.symbol]))))
   if (!data.some((group) => group.id === activeGroupId.value)) {
     activeGroupId.value = data[0]?.id || null
+  }
+  if (selectedAlertGroupId.value !== null && !data.some(group => group.id === selectedAlertGroupId.value)) {
+    changeAlertGroup(null)
   }
   if (!contracts.value.some((contract) => contract.id === selectedId.value) && contracts.value.length) {
     await selectContract(contracts.value[0]!.id)
@@ -1192,6 +1241,7 @@ onBeforeUnmount(() => {
     alertSocket = null
   }
   alertSound.dispose()
+  primaryBrowserNotification?.close()
   signalAbortController?.abort()
   for (const signal of signals.value) flushPeriodNote(signal)
   for (const noteTimer of noteSaveTimers.values()) window.clearTimeout(noteTimer)
@@ -1224,11 +1274,14 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div class="workspace-layout">
+    <div class="workspace-layout" :class="{ 'groups-minimized': collapsedPanels.groups }">
       <aside ref="groupsPanelRef" class="contract-groups-panel resizable-panel" :class="{ collapsed: collapsedPanels.groups }" :style="panelStyle('groups')" aria-label="交易合约列表">
-        <header class="panel-header contract-groups-header">
+        <button v-if="collapsedPanels.groups" type="button" class="group-rail-button" aria-label="展开交易合约栏" aria-expanded="false" title="展开交易合约栏" @click="togglePanel('groups')">
+          <el-icon><ArrowRight /></el-icon><span>交易合约</span>
+        </button>
+        <header v-else class="panel-header contract-groups-header">
           <div><h2>交易合约</h2><span>WATCHLIST · 拖动调整顺序</span></div>
-          <button type="button" class="panel-toggle" @click="togglePanel('groups')">{{ collapsedPanels.groups ? '展开' : '折叠' }}</button>
+          <button type="button" class="panel-toggle group-minimize-button" aria-label="最小化交易合约栏" aria-expanded="true" title="最小化交易合约栏" @click="togglePanel('groups')"><el-icon><ArrowLeft /></el-icon>收起</button>
         </header>
         <div v-if="!collapsedPanels.groups" class="group-columns">
           <div class="group-tabs" role="tablist" aria-label="合约分组">
@@ -1312,12 +1365,20 @@ onBeforeUnmount(() => {
       <div ref="signalsPanelRef" class="signal-area resizable-panel" :class="{ collapsed: collapsedPanels.signals }" :style="panelStyle('signals')">
         <header class="panel-header signal-panel-header">
           <div><span>合约信号</span><strong v-if="selectedContract">{{ displayContractCode(selectedContract.code) }}</strong></div>
+          <el-select
+            :model-value="selectedId" class="signal-contract-search" filterable size="small"
+            aria-label="搜索已添加的合约" placeholder="搜索合约代码或名称" no-match-text="没有匹配的已添加合约"
+            no-data-text="尚未添加合约" @change="selectContract"
+          >
+            <el-option v-for="contract in contracts" :key="contract.id" :value="contract.id" :label="contractSearchLabel(contract)" />
+          </el-select>
           <button type="button" class="panel-toggle" @click="togglePanel('signals')">{{ collapsedPanels.signals ? '展开' : '折叠' }}</button>
         </header>
         <div v-if="!collapsedPanels.signals">
           <div v-if="errorText" class="data-error">{{ errorText }}</div>
           <table v-if="signals.length" class="signal-table"><thead><tr><th>周期</th><th>大趋势</th><th>小趋势</th><th>状态</th><th>日线顺逆</th><th>备注</th></tr></thead><tbody><tr v-for="signal in signals" :key="signal.period.duration_seconds" :class="{ selected: selectedDuration === signal.period.duration_seconds }" @click="selectedDuration = signal.period.duration_seconds"><td><strong>{{ signal.period.label }}</strong></td><td><span class="trend" :class="signal.trend.m4 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m4 }}</span></td><td><span class="trend" :class="signal.trend.m3 === '多' ? 'bullish' : 'bearish'">{{ signal.trend.m3 }}</span></td><td class="signal-state-cell"><div class="state signal-state-layout" :class="signal.cross_type === '金叉' ? 'golden' : signal.cross_type === '死叉' ? 'death' : ''"><span>{{ signal.label }}</span><span class="cross-type">{{ signal.cross_type || '' }}</span></div></td><td class="signal-alignment-cell"><span v-if="signal.alignment_state" class="alignment-state">{{ signal.alignment_state }}</span><span v-else class="alignment-empty">--</span></td><td class="period-note-cell" @click.stop><el-input :model-value="periodNotes[signal.period.duration_seconds] || ''" maxlength="500" size="small" @input="schedulePeriodNoteSave(signal, $event)" @blur="flushPeriodNote(signal)" /></td></tr></tbody></table>
-          <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div><div v-else-if="!errorText" class="empty-signals">当前合约暂无周期配置</div>
+          <div v-else-if="!contracts.length" class="empty-workspace">添加并选择一个合约</div>
+          <div v-else-if="!errorText" class="empty-signals">{{ refreshing ? '正在加载合约信号' : selectedContract?.periods.length ? '等待可用的行情数据' : '当前合约暂无周期配置' }}</div>
           <footer v-if="selectedContract" class="ma-footer"><span>均线数值 · {{ displayContractCode(selectedContract.code) }} · {{ selectedSignal?.period.label || '--' }}：</span><strong>M4：{{ maText('M4') }}{{ longTrendText('m4') }}</strong><strong>M3：{{ maText('M3') }}{{ longTrendText('m3') }}</strong><strong>M2：{{ maText('M2') }}</strong><strong>M1：{{ maText('M1') }}</strong><small v-if="selectedSignal">{{ selectedSignal.period.label }} · {{ selectedSignal.bar_time.replace('T', ' ').slice(0, 19) }} · {{ dataStatusText(selectedSignal) }}</small><small v-else>等待可用的实时 K 线数据</small></footer>
         </div>
       </div>
@@ -1325,7 +1386,17 @@ onBeforeUnmount(() => {
       <section ref="alertsPanelRef" class="alert-center resizable-panel" :class="{ collapsed: collapsedPanels.alerts }" :style="panelStyle('alerts')" aria-label="全品种预警">
         <header class="alert-center-header">
           <div><span class="alert-kicker">MARKET SENTINEL</span><h2>全品种预警</h2></div>
-          <div class="alert-header-actions"><span class="alert-status" :class="{ scanning: alertScanning }">{{ alertStatusText }}</span><button type="button" class="panel-toggle" @click="togglePanel('alerts')">{{ collapsedPanels.alerts ? '展开' : '折叠' }}</button></div>
+          <div class="alert-header-actions">
+            <label class="alert-group-picker">
+              <span>预警分组</span>
+              <select :value="selectedAlertGroupId ?? ''" @change="changeAlertGroup(Number(($event.target as HTMLSelectElement).value) || null)">
+                <option value="">所有分组</option>
+                <option v-for="group in contractGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
+              </select>
+            </label>
+            <span class="alert-status" :class="{ scanning: alertScanning }">{{ alertStatusText }}</span>
+            <button type="button" class="panel-toggle" @click="togglePanel('alerts')">{{ collapsedPanels.alerts ? '展开' : '折叠' }}</button>
+          </div>
         </header>
         <div v-if="!collapsedPanels.alerts">
           <div v-if="!selectedAlertDurations.length" class="alert-inactive" role="status"><span>尚未开启预警。选择监测周期后生效，设置会自动保存。</span><button type="button" @click="enableAllAlertPeriods">开启全部周期</button></div>
@@ -1336,7 +1407,7 @@ onBeforeUnmount(() => {
             <section v-for="group in alertPeriodGroups" :key="group.durationSeconds" class="alert-period-group" :aria-label="`${group.label}预警`">
               <h3 class="alert-period-heading"><span>{{ group.label }}</span><small>{{ group.signals.length }} 条</small></h3>
               <div v-if="group.signals.length" class="alert-result-grid">
-                <button v-for="signal in group.signals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" type="button" class="alert-result-item alert-result-link" :title="`为 ${alertText(signal)} 设置二级预警`" @click="followupPanel?.open(signal)">
+                <button v-for="signal in group.signals" :key="`${signal.contract_id}-${signal.period.duration_seconds}`" type="button" class="alert-result-item alert-result-link" :title="`查看 ${signal.symbol} 的全部周期并设置二级预警`" @click="followupPanel?.open(signal)">
                   <span class="signal-pulse"></span><span class="alert-result-text">{{ alertText(signal) }}</span><span v-if="alertCount(signal)" class="alert-new-badge" :title="alertCountTitle(signal)">+{{ alertCount(signal) }}</span>
                 </button>
               </div>

@@ -110,6 +110,7 @@ def _log_signal_requirement_once(contract_id: int, symbol: str, error: ValueErro
 
 class AlertScanBody(BaseModel):
     durations: list[int] = Field(default_factory=list, max_length=10)
+    group_id: int | None = Field(default=None, gt=0)
 
     @field_validator("durations")
     @classmethod
@@ -118,6 +119,10 @@ class AlertScanBody(BaseModel):
         if any(value not in _SUPPORTED_ALERT_DURATIONS for value in unique_values):
             raise ValueError("预警周期不受支持")
         return unique_values
+
+
+class AlertSubscriptionBody(AlertScanBody):
+    selection_version: int | None = Field(default=None, ge=0)
 
 
 def _iso_time(timestamp_ns: int | None) -> str | None:
@@ -409,6 +414,7 @@ def scan_cached_alerts_for_user(
     repository: ConfigRepository,
     user_id: str,
     durations: frozenset[int],
+    group_id: int | None = None,
     *,
     client: TqClient | None = None,
 ) -> dict[str, object]:
@@ -416,6 +422,8 @@ def scan_cached_alerts_for_user(
     if not durations:
         return {"signals": [], "requested": 0, "failed": 0}
     contracts = repository.list_contracts(user_id)
+    if group_id is not None:
+        contracts = [contract for contract in contracts if contract.group_id == group_id]
     excluded = {
         contract.symbol for contract in contracts
         if client is not None and client.contract_status(contract.symbol) == "expired"
@@ -477,11 +485,13 @@ async def stream_alerts(websocket: WebSocket) -> None:
                 service.offer_control(subscriber.id, "invalid_message")
                 continue
             try:
-                body = AlertScanBody.model_validate(message)
+                body = AlertSubscriptionBody.model_validate(message)
             except ValidationError:
                 service.offer_control(subscriber.id, "invalid_subscription")
                 continue
-            await service.update(subscriber.id, frozenset(body.durations))
+            await service.update(
+                subscriber.id, frozenset(body.durations), body.group_id, body.selection_version,
+            )
     except WebSocketDisconnect:
         pass
     finally:
@@ -566,5 +576,6 @@ async def scan_alerts(
         repository,
         user_id,
         frozenset(body.durations),
+        body.group_id,
         client=getattr(request.app.state, "tq_client", None),
     )

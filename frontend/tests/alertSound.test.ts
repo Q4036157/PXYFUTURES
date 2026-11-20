@@ -106,6 +106,24 @@ test('播放失败不会无限重试，未知状态不猜声音，之后新预�
   sound.dispose()
 })
 
+test('切换一层预警分组时停止旧组音频，已排队的二级预警继续播放', async () => {
+  const { sound, played, players, overlaps } = fixture(false)
+  sound.playStates(['上涨', '下跌'], 'primary')
+  sound.playStates(['下跌'], 'followup')
+  await flush()
+  assert.deepEqual(played, ['Buy.wav'])
+  sound.stop('primary')
+  await flush()
+  assert.deepEqual(played, ['Buy.wav', 'Sell.wav'])
+  for (let repeat = 0; repeat < 5; repeat += 1) {
+    players[1]!.end()
+    await flush()
+  }
+  assert.deepEqual(played, ['Buy.wav', ...Array(5).fill('Sell.wav')])
+  assert.equal(overlaps(), 0)
+  sound.dispose()
+})
+
 test('两份用户音频均为有效WAV文件', () => {
   for (const name of ['Buy', 'Sell']) {
     const data = readFileSync(new URL(`../src/assets/${name}.wav`, import.meta.url))

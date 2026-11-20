@@ -81,6 +81,28 @@ def test_one_minute_is_an_accepted_alert_period() -> None:
     assert body.durations == [60]
 
 
+@pytest.mark.parametrize(("group_id", "expected"), [(None, [1, 2]), (21, [1]), (22, [2]), (99, [])])
+def test_alert_scan_limits_calculation_to_the_selected_user_group(monkeypatch, group_id, expected):
+    def contracts(user_id):
+        assert user_id == "current-user"
+        return [
+            ContractConfig(1, "DCE.I2701", "铁矿", [_period(1_800, "30分钟")], group_id=21),
+            ContractConfig(2, "CZCE.AP705", "苹果", [_period(1_800, "30分钟")], group_id=22),
+        ]
+
+    def scan(_repository, jobs):
+        assert [contract.id for contract, _period_config in jobs] == expected
+        return [{"contract_id": contract.id} for contract, _period_config in jobs], 0
+
+    repository = SimpleNamespace(list_contracts=contracts)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(config_repository=repository)))
+    monkeypatch.setattr(signals, "_scan_cached_alert_jobs", scan)
+    result = asyncio.run(signals.scan_alerts(
+        signals.AlertScanBody(durations=[1_800], group_id=group_id), request, "current-user",
+    ))
+    assert result == {"signals": [{"contract_id": item} for item in expected], "requested": len(expected), "failed": 0}
+
+
 @pytest.mark.parametrize(("label", "position", "expected"), [
     ("上涨", "above", "顺多"),
     ("反弹", "above", "顺多"),
